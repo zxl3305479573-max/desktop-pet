@@ -34,8 +34,8 @@ export function UploadZone({ onUpload, disabled = false }: Props) {
         className="hidden" id="photo-upload" disabled={disabled} />
       <label htmlFor="photo-upload" className="cursor-pointer">
         <p className="text-5xl mb-3">📸</p>
-        <p className="text-lg font-medium mb-1">Drop your photo here</p>
-        <p className="text-sm text-slate-400">or click to browse — PNG, JPG, WebP (max 10MB)</p>
+        <p className="text-lg font-medium mb-1">拖拽照片到此处</p>
+        <p className="text-sm text-slate-400">或点击选择 — 支持 PNG、JPG、WebP（最大 10MB）</p>
       </label>
     </div>
   )

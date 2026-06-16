@@ -8,22 +8,22 @@ export default function Home() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold">My Pets</h2>
+        <h2 className="text-2xl font-bold">我的伴侣</h2>
         <Link to="/create"
           className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm transition">
-          + New Pet
+          + 创建伴侣
         </Link>
       </div>
 
-      {loading && <p className="text-slate-400">Loading...</p>}
-      {error && <p className="text-red-400 mb-4">Error: {error}</p>}
+      {loading && <p className="text-slate-400">加载中...</p>}
+      {error && <p className="text-red-400 mb-4">错误: {error}</p>}
 
       {!loading && pets.length === 0 && (
         <div className="text-center py-20">
-          <p className="text-5xl mb-4">🐾</p>
-          <p className="text-slate-400 text-lg mb-4">No pets yet</p>
+          <p className="text-5xl mb-4">🎨</p>
+          <p className="text-slate-400 text-lg mb-4">还没有伴侣</p>
           <Link to="/create" className="text-indigo-400 hover:underline">
-            Create your first desktop pet →
+            创建你的第一个桌面伴侣 →
           </Link>
         </div>
       )}

@@ -41,7 +41,7 @@ export function PetCard({ pet, onDelete }: Props) {
           {pet.status === 'ready' && (
             <button onClick={() => openPetWindow(pet.id)}
               className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm py-1.5 rounded-lg transition">
-              🚀 Launch
+              🚀 启动
             </button>
           )}
           <button onClick={() => onDelete(pet.id)}

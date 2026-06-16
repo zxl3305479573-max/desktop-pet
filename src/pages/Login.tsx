@@ -37,9 +37,9 @@ export default function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-950">
       <div className="bg-slate-800 rounded-xl p-8 w-full max-w-sm border border-slate-700">
-        <h1 className="text-2xl font-bold text-center mb-2">🐶 Pet-Bot</h1>
+        <h1 className="text-2xl font-bold text-center mb-2">✨ 可视化伴侣</h1>
         <p className="text-slate-400 text-center mb-6 text-sm">
-          {isRegister ? 'Create your account' : 'Sign in to your account'}
+          {isRegister ? '创建你的账号' : '登录你的账号'}
         </p>
 
         {error && (
@@ -82,12 +82,12 @@ export default function Login() {
         </form>
 
         <p className="text-sm text-slate-400 text-center mt-4">
-          {isRegister ? 'Already have an account?' : "Don't have an account?"}{' '}
+          {isRegister ? '已有账号？' : '还没有账号？'}{' '}
           <button
             onClick={() => { setIsRegister(!isRegister); setError('') }}
             className="text-indigo-400 hover:underline"
           >
-            {isRegister ? 'Sign in' : 'Register'}
+            {isRegister ? '去登录' : '去注册'}
           </button>
         </p>
       </div>

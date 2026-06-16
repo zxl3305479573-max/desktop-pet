@@ -35,8 +35,11 @@ async function main() {
 
   // Start Electron
   console.log('[electron] Starting Electron...')
+  const electronBin = process.platform === 'win32'
+    ? resolve(root, 'node_modules/electron/dist/electron.exe')
+    : resolve(root, 'node_modules/.bin/electron')
   const electron = spawn(
-    resolve(root, 'node_modules/.bin/electron.cmd'),
+    electronBin,
     [resolve(outDir, 'main.js')],
     {
       cwd: root,

@@ -9,7 +9,7 @@ export function createMainWindow(): BrowserWindow {
     height: 680,
     minWidth: 700,
     minHeight: 500,
-    title: 'Pet-Bot',
+    title: '可视化伴侣',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
