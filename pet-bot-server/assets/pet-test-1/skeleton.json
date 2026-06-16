@@ -1,0 +1,1 @@
+{"bones": [{"name": "root"}, {"name": "spine", "parent": "root"}, {"name": "head", "parent": "spine"}, {"name": "left_arm", "parent": "spine"}, {"name": "right_arm", "parent": "spine"}], "animations": {"idle": {}, "walk": {}, "poke": {}}}

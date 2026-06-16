@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.database import init_db
 
@@ -21,12 +22,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Static file serving for generated assets
+app.mount("/assets", StaticFiles(directory=settings.asset_dir), name="assets")
+
 
 @app.get("/health")
 def health():
     return {"status": "ok", "app": settings.app_name}
 
 
-from app.routers import auth, generation
+# Routers
+from app.routers import auth, pets, generation
 app.include_router(auth.router)
+app.include_router(pets.router)
 app.include_router(generation.router)
