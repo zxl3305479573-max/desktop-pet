@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, HTTPException, Form
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/v1", tags=["generation"])
 async def upload_photo(
     name: str = Form(default="My Pet"),
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -44,5 +45,8 @@ async def upload_photo(
     db.add(job)
     db.commit()
     db.refresh(job)
+
+    from app.services.pipeline import run_pipeline_background
+    background_tasks.add_task(run_pipeline_background, job.id)
 
     return UploadResponse(pet_id=pet_id, job_id=job.id, status="queued")
