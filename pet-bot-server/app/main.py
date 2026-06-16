@@ -27,5 +27,6 @@ def health():
     return {"status": "ok", "app": settings.app_name}
 
 
-from app.routers import auth
+from app.routers import auth, generation
 app.include_router(auth.router)
+app.include_router(generation.router)
