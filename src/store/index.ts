@@ -7,6 +7,7 @@ interface AppState {
   selectedProvider: string
   credits: number
   costPerGen: number
+  role: string
 
   setToken: (token: string | null) => void
   setBackendUrl: (url: string) => void
@@ -23,6 +24,7 @@ export const useStore = create<AppState>((set) => ({
   selectedProvider: 'builtin',
   credits: 0,
   costPerGen: 10,
+  role: 'user',
 
   setToken: (token) => set({ token }),
   setBackendUrl: (url) => set({ backendUrl: url }),
@@ -30,4 +32,5 @@ export const useStore = create<AppState>((set) => ({
   setSelectedProvider: (p) => set({ selectedProvider: p }),
   setCredits: (c) => set({ credits: c }),
   setCostPerGen: (c) => set({ costPerGen: c }),
+  setRole: (r: string) => set({ role: r }),
 }))

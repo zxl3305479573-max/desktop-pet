@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useStore } from '../store'
 
 export default function Login() {
-  const { backendUrl, setToken } = useStore()
+  const { backendUrl, setToken, setRole } = useStore()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [isRegister, setIsRegister] = useState(false)
@@ -27,6 +27,7 @@ export default function Login() {
       }
       const data = await res.json()
       setToken(data.access_token)
+      setRole(data.role || 'user')
     } catch (e: any) {
       setError(e.message)
     } finally {

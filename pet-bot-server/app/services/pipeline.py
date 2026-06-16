@@ -287,14 +287,18 @@ def _draw_skeleton_overlay(image_bytes: bytes, skeleton_json: str) -> bytes:
 
 def check_and_deduct_credits(user_id: str, provider: str, db: Session, description: str = "") -> bool:
     """For builtin provider: check if user has enough credits, deduct if yes.
+    Admin users skip the check and never get deducted.
     Returns True if deduction succeeded, False if insufficient credits."""
     if provider != "builtin":
-        return True  # Custom API key — user pays their own provider
+        return True
 
-    cost = settings.credit_cost_per_generation
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         return False
+    if user.role == "admin":
+        return True  # Admin — unlimited usage
+
+    cost = settings.credit_cost_per_generation
     if user.credits < cost:
         return False
 

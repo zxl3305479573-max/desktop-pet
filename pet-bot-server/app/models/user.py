@@ -11,5 +11,6 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    credits: Mapped[int] = mapped_column(Integer, default=0)  # 积分余额
+    credits: Mapped[int] = mapped_column(Integer, default=0)
+    role: Mapped[str] = mapped_column(String(16), default="user")  # "admin" | "user"
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

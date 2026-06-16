@@ -80,4 +80,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ amount }),
     }),
+
+  // Admin
+  adminListUsers: () =>
+    request<{ users: Array<{ id: string; email: string; credits: number; role: string; created_at: string }> }>('/api/v1/credits/admin/users'),
+
+  adminPromote: (email: string) =>
+    request<any>(`/api/v1/credits/admin/promote/${encodeURIComponent(email)}`, { method: 'POST' }),
+
+  adminAdjustCredits: (email: string, amount: number) =>
+    request<any>('/api/v1/credits/admin/adjust-credits', {
+      method: 'POST',
+      body: JSON.stringify({ email, amount }),
+    }),
 }

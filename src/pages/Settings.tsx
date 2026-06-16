@@ -6,10 +6,13 @@ import { api } from '../lib/api'
 const RECHARGE_OPTIONS = [100, 300, 500, 1000]
 
 export default function Settings() {
-  const { customApiKey, setCustomApiKey, credits, setCredits, costPerGen } = useStore()
+  const { customApiKey, setCustomApiKey, credits, setCredits, costPerGen, role } = useStore()
   const [recharging, setRecharging] = useState(false)
   const [customAmount, setCustomAmount] = useState('')
   const [txns, setTxns] = useState<any[]>([])
+  const [adminUsers, setAdminUsers] = useState<any[]>([])
+  const [adminEmail, setAdminEmail] = useState('')
+  const [adminCredits, setAdminCredits] = useState('')
 
   useEffect(() => {
     api.getCredits().then(d => {
@@ -33,9 +36,83 @@ export default function Settings() {
     }
   }
 
+  const loadAdminUsers = async () => {
+    try {
+      const data = await api.adminListUsers()
+      setAdminUsers(data.users)
+    } catch (e: any) { alert(e.message) }
+  }
+
+  const handlePromote = async () => {
+    try {
+      await api.adminPromote(adminEmail)
+      alert(`已将 ${adminEmail} 提升为管理员`)
+      loadAdminUsers()
+    } catch (e: any) { alert(e.message) }
+  }
+
+  const handleAdjustCredits = async () => {
+    try {
+      const amt = parseInt(adminCredits)
+      if (isNaN(amt)) return
+      await api.adminAdjustCredits(adminEmail, amt)
+      alert(`已将 ${adminEmail} 积分调整为 ${amt}`)
+      loadAdminUsers()
+    } catch (e: any) { alert(e.message) }
+  }
+
   return (
     <div>
       <h2 className="text-2xl font-bold mb-6">设置</h2>
+
+      {/* Admin Panel */}
+      {role === 'admin' && (
+        <div className="bg-indigo-900/50 rounded-xl p-6 border border-indigo-700 max-w-2xl mb-6">
+          <h3 className="text-lg font-medium mb-4">🛡️ 管理员面板</h3>
+
+          <div className="mb-4 flex gap-2">
+            <input type="email" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)}
+              placeholder="用户邮箱" className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm" />
+            <button onClick={handlePromote}
+              className="px-3 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg text-sm">提升为管理员</button>
+          </div>
+
+          <div className="mb-4 flex gap-2">
+            <input type="number" value={adminCredits} onChange={(e) => setAdminCredits(e.target.value)}
+              placeholder="积分数额" className="w-32 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm" />
+            <button onClick={handleAdjustCredits}
+              className="px-3 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm">调整积分</button>
+          </div>
+
+          <button onClick={loadAdminUsers}
+            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm mb-3">
+            🔄 加载所有用户
+          </button>
+
+          {adminUsers.length > 0 && (
+            <div className="max-h-60 overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead><tr className="text-slate-400 border-b border-slate-700">
+                  <th className="text-left py-1">邮箱</th>
+                  <th className="text-right py-1">积分</th>
+                  <th className="text-right py-1">角色</th>
+                </tr></thead>
+                <tbody>
+                  {adminUsers.map((u: any) => (
+                    <tr key={u.id} className="border-b border-slate-800">
+                      <td className="py-1">{u.email}</td>
+                      <td className="text-right py-1">{u.credits}</td>
+                      <td className="text-right py-1">
+                        <span className={u.role === 'admin' ? 'text-yellow-400' : 'text-slate-500'}>{u.role}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Credits section */}
       <div className="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-lg mb-6">
