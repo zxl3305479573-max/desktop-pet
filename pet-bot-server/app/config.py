@@ -14,9 +14,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 1440
     cors_origins: str = "*"
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
 settings = Settings()
