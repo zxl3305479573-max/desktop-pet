@@ -6,7 +6,11 @@ def test_upload_photo_requires_auth(client):
     assert resp.status_code in (401, 403)
 
 
-def test_upload_photo_success(client, auth_headers):
+def test_upload_photo_success(client, auth_headers, db_session, test_user):
+    # Give test user enough credits
+    from app.services.pipeline import add_credits
+    add_credits(test_user.id, 100, db_session)
+
     fake_img = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
     resp = client.post(
         "/api/v1/upload",

@@ -31,11 +31,11 @@ export function useGeneration() {
     }, 2000)
   }, [])
 
-  const upload = useCallback(async (file: File, name: string) => {
+  const upload = useCallback(async (file: File, name: string, prompt: string, provider: string) => {
     setStage('uploading')
     setError(null)
     try {
-      const result = await api.uploadPhoto(file, name)
+      const result = await api.uploadPhoto(file, name, prompt, provider)
       setPetId(result.pet_id)
       setStage('generating')
       startPolling(result.job_id)

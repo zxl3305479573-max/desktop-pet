@@ -5,6 +5,8 @@ from app.database import SessionLocal
 from app.models.pet import Pet, PetStatus
 from app.models.generation_job import GenerationJob, JobStatus
 from app.models.quota import QuotaUsage
+from app.models.user import User
+from app.models.credit_transaction import CreditTransaction, TransactionType
 from app.config import settings
 from app.providers.registry import get_provider
 from app.storage.local import storage
@@ -105,7 +107,52 @@ def _run_pipeline_sync(db: Session, job: GenerationJob, pet: Pet):
         db.commit()
 
 
+def check_and_deduct_credits(user_id: str, provider: str, db: Session, description: str = "") -> bool:
+    """For builtin provider: check if user has enough credits, deduct if yes.
+    Returns True if deduction succeeded, False if insufficient credits."""
+    if provider != "builtin":
+        return True  # Custom API key — user pays their own provider
+
+    cost = settings.credit_cost_per_generation
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return False
+    if user.credits < cost:
+        return False
+
+    user.credits -= cost
+    txn = CreditTransaction(
+        user_id=user_id,
+        type=TransactionType.CONSUME,
+        amount=-cost,
+        balance_after=user.credits,
+        description=description or f"Generation cost: {cost} credits",
+    )
+    db.add(txn)
+    db.commit()
+    return True
+
+
+def add_credits(user_id: str, amount: int, db: Session, description: str = "Recharge") -> int:
+    """Add credits to user account. Returns new balance."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise ValueError("User not found")
+    user.credits += amount
+    txn = CreditTransaction(
+        user_id=user_id,
+        type=TransactionType.RECHARGE,
+        amount=amount,
+        balance_after=user.credits,
+        description=description,
+    )
+    db.add(txn)
+    db.commit()
+    return user.credits
+
+
 def check_and_increment_quota(user_id: str, provider: str, db: Session) -> bool:
+    """Deprecated — use check_and_deduct_credits instead."""
     """Return True if user is within quota. Increments count on success."""
     today = date.today()
     quota = db.query(QuotaUsage).filter(

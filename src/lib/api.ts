@@ -37,10 +37,12 @@ export const api = {
   deletePet: (id: string) =>
     fetch(`${getBaseUrl()}/api/v1/pets/${id}`, { method: 'DELETE', headers: headers() }),
 
-  uploadPhoto: async (file: File, name: string) => {
+  uploadPhoto: async (file: File, name: string, prompt?: string, provider?: string) => {
     const form = new FormData()
     form.append('file', file)
     form.append('name', name)
+    if (prompt) form.append('prompt', prompt)
+    if (provider) form.append('provider', provider)
     const res = await fetch(`${getBaseUrl()}/api/v1/upload`, {
       method: 'POST',
       headers: { ...headers() },
@@ -66,4 +68,13 @@ export const api = {
     if (!res.ok) throw new Error('Download failed')
     return res.arrayBuffer()
   },
+
+  getCredits: () =>
+    request<{ balance: number; cost_per_generation: number; transactions: any[] }>('/api/v1/credits/me'),
+
+  rechargeCredits: (amount: number) =>
+    request<{ balance: number; recharged: number }>('/api/v1/credits/recharge', {
+      method: 'POST',
+      body: JSON.stringify({ amount }),
+    }),
 }

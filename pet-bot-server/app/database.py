@@ -19,6 +19,7 @@ def init_db():
     from app.models.pet import Pet  # noqa: F401
     from app.models.generation_job import GenerationJob  # noqa: F401
     from app.models.quota import QuotaUsage  # noqa: F401
+    from app.models.credit_transaction import CreditTransaction  # noqa: F401
     Base.metadata.create_all(bind=engine)
 
 

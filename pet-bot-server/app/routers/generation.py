@@ -21,8 +21,10 @@ router = APIRouter(prefix="/api/v1", tags=["generation"])
 
 @router.post("/upload", response_model=UploadResponse, status_code=202)
 async def upload_photo(
-    name: str = Form(default="My Pet"),
+    name: str = Form(default="My Companion"),
     file: UploadFile = File(...),
+    prompt: str = Form(default=""),
+    provider: str = Form(default="builtin"),
     background_tasks: BackgroundTasks = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -34,6 +36,17 @@ async def upload_photo(
     contents = await file.read()
     if len(contents) > 10 * 1024 * 1024:
         raise HTTPException(400, "File too large (max 10 MB)")
+
+    # Credit check for builtin provider
+    from app.services.pipeline import check_and_deduct_credits
+    if provider == "builtin":
+        cost = settings.credit_cost_per_generation
+        ok = check_and_deduct_credits(
+            user.id, provider, db,
+            description=f"Generate: {name} ({cost} credits)",
+        )
+        if not ok:
+            raise HTTPException(402, f"积分不足！需要 {cost} 积分，当前余额: {user.credits}")
 
     pet_id = str(uuid.uuid4())
     ext = allowed[file.content_type]
@@ -47,7 +60,7 @@ async def upload_photo(
         user_id=user.id,
         pet_id=pet_id,
         status=JobStatus.QUEUED,
-        provider="builtin",
+        provider=provider,
     )
     db.add(job)
     db.commit()
