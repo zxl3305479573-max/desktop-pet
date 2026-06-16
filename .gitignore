@@ -4,3 +4,8 @@ dist/
 .env
 __pycache__/
 *.pyc
+pet-bot-server/test.db
+pet-bot-server/petbot.db
+pet-bot-server/uploads/*
+pet-bot-server/assets/*
+pet-bot-server/venv/
