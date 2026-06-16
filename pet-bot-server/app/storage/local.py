@@ -26,6 +26,11 @@ class LocalStorage:
         if asset_dir.exists():
             shutil.rmtree(asset_dir)
 
+    def get_asset_path(self, pet_id: str, name: str) -> str:
+        """Return full path for a pet asset."""
+        asset_dir = Path(settings.asset_dir) / pet_id
+        return str(asset_dir / name)
+
     def delete_upload(self, path_str: str):
         p = Path(path_str)
         if p.exists():

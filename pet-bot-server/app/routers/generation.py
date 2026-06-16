@@ -100,6 +100,31 @@ def get_job_status(
     )
 
 
+@router.post("/jobs/{job_id}/next")
+def run_next_stage(
+    job_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.query(GenerationJob).filter(
+        GenerationJob.id == job_id, GenerationJob.user_id == user.id
+    ).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    next_stage = job.stage_progress + 1
+    if next_stage > 5:
+        raise HTTPException(400, "All stages completed")
+
+    from app.services.pipeline import run_single_stage
+    result = run_single_stage(job_id, next_stage)
+
+    if result.get("status") == "error":
+        raise HTTPException(500, result.get("message", "Stage failed"))
+
+    return result
+
+
 @router.post("/jobs/{job_id}/confirm")
 def confirm_job(
     job_id: str,

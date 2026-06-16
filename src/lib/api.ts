@@ -57,6 +57,9 @@ export const api = {
 
   getJobStatus: (jobId: string) => request<JobStatus>(`/api/v1/jobs/${jobId}`),
 
+  runNextStage: (jobId: string) =>
+    request<any>(`/api/v1/jobs/${jobId}/next`, { method: 'POST' }),
+
   confirmGeneration: (jobId: string, action: 'confirm' | 'regenerate') =>
     request<{ status: string; pet_id?: string; job_id?: string }>(
       `/api/v1/jobs/${jobId}/confirm`,

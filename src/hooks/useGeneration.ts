@@ -3,33 +3,28 @@ import { api } from '../lib/api'
 import { savePetLocally, openPetWindow } from '../lib/db'
 import type { JobStatus } from '../../shared/types'
 
-type Stage = 'idle' | 'uploading' | 'generating' | 'review' | 'confirming' | 'done' | 'error'
+type Stage = 'idle' | 'uploading' | 'stepping' | 'review' | 'confirming' | 'done' | 'error'
+
+interface StepResult {
+  stage: number
+  status: string
+  preview?: string
+  keypoints?: number
+  confidence?: number
+  parts?: number
+  bones?: number
+  rig_quality?: string
+  message?: string
+}
 
 export function useGeneration() {
   const [stage, setStage] = useState<Stage>('idle')
   const [petId, setPetId] = useState<string | null>(null)
-  const [job, setJob] = useState<JobStatus | null>(null)
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [currentStep, setCurrentStep] = useState(1)
+  const [stepResult, setStepResult] = useState<StepResult | null>(null)
+  const [stepLoading, setStepLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const pollRef = useRef<ReturnType<typeof setInterval>>()
-
-  const startPolling = useCallback((jobId: string) => {
-    pollRef.current = setInterval(async () => {
-      try {
-        const status = await api.getJobStatus(jobId)
-        setJob(status)
-        if (status.status === 'awaiting_review') {
-          clearInterval(pollRef.current)
-          setStage('review')
-        } else if (status.status === 'failed' || status.status === 'needs_better_photo') {
-          clearInterval(pollRef.current)
-          setStage('error')
-          setError(status.error_message || 'Generation failed')
-        }
-      } catch {
-        // keep polling
-      }
-    }, 2000)
-  }, [])
 
   const upload = useCallback(async (file: File, name: string, prompt: string, provider: string) => {
     setStage('uploading')
@@ -37,51 +32,94 @@ export function useGeneration() {
     try {
       const result = await api.uploadPhoto(file, name, prompt, provider)
       setPetId(result.pet_id)
-      setStage('generating')
-      startPolling(result.job_id)
+      setJobId(result.job_id)
+      setCurrentStep(0) // Ready to start step 1
+      setStage('stepping')
     } catch (e: any) {
       setError(e.message)
       setStage('error')
     }
-  }, [startPolling])
+  }, [])
+
+  const runNextStep = useCallback(async () => {
+    if (!jobId) return
+    const nextStep = currentStep + 1
+    if (nextStep > 5) return
+
+    setStepLoading(true)
+    setError(null)
+    try {
+      const result = await api.runNextStage(jobId)
+      if (result.status === 'failed' || result.status === 'error') {
+        setError(result.message || 'Step failed')
+        return
+      }
+      setStepResult(result)
+      setCurrentStep(nextStep)
+      if (nextStep === 5) {
+        setStage('review')
+      }
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setStepLoading(false)
+    }
+  }, [jobId, currentStep])
+
+  const regenerateStep = useCallback(async () => {
+    if (!jobId) return
+    setStepLoading(true)
+    setError(null)
+    try {
+      const result = await api.runNextStage(jobId)
+      if (result.status === 'failed' || result.status === 'error') {
+        setError(result.message || 'Step failed')
+        return
+      }
+      setStepResult(result)
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setStepLoading(false)
+    }
+  }, [jobId])
 
   const confirm = useCallback(async () => {
-    if (!job) return
+    if (!jobId || !petId) return
     setStage('confirming')
     try {
-      const result = await api.confirmGeneration(job.job_id, 'confirm')
-      if (result.pet_id) {
-        const bundle = await api.downloadPet(result.pet_id)
-        await savePetLocally(result.pet_id, bundle)
-        openPetWindow(result.pet_id)
-      }
+      await api.confirmGeneration(jobId, 'confirm')
+      const bundle = await api.downloadPet(petId)
+      await savePetLocally(petId, bundle)
+      openPetWindow(petId)
       setStage('done')
     } catch (e: any) {
       setError(e.message)
       setStage('error')
     }
-  }, [job])
+  }, [jobId, petId])
 
   const regenerate = useCallback(async () => {
-    if (!job) return
-    setStage('generating')
-    setError(null)
+    if (!jobId) return
     try {
-      const result = await api.confirmGeneration(job.job_id, 'regenerate')
-      if (result.job_id) startPolling(result.job_id)
+      await api.confirmGeneration(jobId, 'regenerate')
+      setCurrentStep(0)
+      setStepResult(null)
+      setStage('stepping')
     } catch (e: any) {
       setError(e.message)
-      setStage('error')
     }
-  }, [job, startPolling])
+  }, [jobId])
 
   const reset = useCallback(() => {
-    if (pollRef.current) clearInterval(pollRef.current)
     setStage('idle')
     setPetId(null)
-    setJob(null)
+    setJobId(null)
+    setCurrentStep(1)
+    setStepResult(null)
+    setStepLoading(false)
     setError(null)
   }, [])
 
-  return { stage, petId, job, error, upload, confirm, regenerate, reset }
+  return { stage, petId, jobId, currentStep, stepResult, stepLoading, error, upload, runNextStep, regenerateStep, confirm, regenerate, reset }
 }
