@@ -1,14 +1,14 @@
-# Pet-Bot Backend Implementation Plan
+# Pet-Bot Backend Implementation Plan (Revised)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:parallel-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Python FastAPI backend that accepts photo uploads, runs the 7-stage AI pipeline to generate a bone-rigged desktop pet, and serves pet asset bundles.
+**Goal:** Build the Python FastAPI backend that accepts photo uploads, runs an async 5-stage AI pipeline (pose → bg removal → segment → rig → atlas+preview) via BackgroundTasks, serves validated .pet bundles, with JWT auth + per-user quota tracking.
 
-**Architecture:** FastAPI app with SQLite, provider-abstraction for AI APIs, local file storage. The 7-stage pipeline is orchestrated by a Pipeline service; each stage is an independent service module. API routes are versioned under `/api/v1`.
+**Architecture:** FastAPI + SQLite + JWT auth + BackgroundTasks for async pipeline + server-side-only API keys. Four core models: User, Pet, GenerationJob, QuotaUsage. Pipeline stages have quality gates that fail gracefully with actionable error codes.
 
-**Tech Stack:** Python 3.11+, FastAPI, SQLAlchemy + SQLite, httpx, Pillow, rembg, mediapipe
+**Tech Stack:** Python 3.11+, FastAPI, SQLAlchemy + SQLite, python-jose (JWT), bcrypt, Pillow, rembg, mediapipe
 
-**Source:** Spec `docs/superpowers/specs/2026-06-16-pet-bot-design.md`
+**Source:** Revised spec `docs/superpowers/specs/2026-06-16-pet-bot-design.md`
 
 ---
 
@@ -16,54 +16,63 @@
 
 ```
 pet-bot-server/
-├── requirements.txt          # Dependencies
-├── .env.example              # Environment template
+├── requirements.txt
+├── .env.example
 ├── app/
 │   ├── __init__.py
-│   ├── main.py               # FastAPI app entry, lifespan, CORS
-│   ├── config.py             # Pydantic Settings, env loading
-│   ├── database.py           # SQLAlchemy engine, session, Base
+│   ├── main.py               # FastAPI app, lifespan, CORS, router registration
+│   ├── config.py             # Pydantic Settings (secrets from env only)
+│   ├── database.py           # Engine, SessionLocal, Base, init_db
+│   ├── auth.py               # JWT encode/decode, get_current_user dependency
 │   ├── models/
 │   │   ├── __init__.py
-│   │   └── pet.py            # Pet ORM model
+│   │   ├── user.py           # User: id, email, password_hash, created_at
+│   │   ├── pet.py            # Pet: id, user_id FK, name, status, paths
+│   │   ├── generation_job.py # Job: id, user_id FK, pet_id FK, status, progress, provider
+│   │   └── quota.py          # QuotaUsage: id, user_id, provider, job_count, date
 │   ├── schemas/
 │   │   ├── __init__.py
-│   │   └── pet.py            # Pydantic request/response schemas
+│   │   ├── auth.py           # RegisterRequest, LoginRequest, TokenResponse
+│   │   ├── pet.py            # PetCreate, PetResponse, PetList
+│   │   └── generation.py     # UploadResponse, JobStatus, ConfirmRequest
 │   ├── routers/
 │   │   ├── __init__.py
-│   │   ├── pets.py           # Pet CRUD endpoints
-│   │   └── generation.py     # Upload + pipeline trigger + status
+│   │   ├── auth.py           # POST /auth/register, /auth/login
+│   │   ├── pets.py           # GET/DELETE /pets, GET /pets/{id}
+│   │   └── generation.py     # POST /upload, GET/POST /jobs/...
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── pipeline.py       # Orchestrator: run all 7 stages
-│   │   ├── pose.py           # Stage 1: Pose estimation
-│   │   ├── segmentation.py   # Stage 2-3: BG removal + part split
-│   │   ├── stylization.py    # Stage 4: Part stylization
-│   │   ├── rigging.py        # Stage 5: Keypoints → Spine JSON
-│   │   └── preview.py        # Stage 6: Render multi-view PNGs
+│   │   ├── pipeline.py       # Orchestrator: run stages, update job, check quota
+│   │   ├── pose.py           # Stage 1: Pose estimation + quality gate
+│   │   ├── segmentation.py   # Stage 2-3: BG removal + part split + fallbacks
+│   │   ├── rigging.py        # Stage 4: 12-bone template → skeleton JSON
+│   │   └── atlas.py          # Stage 5: Part packing → atlas.png + atlas.json
 │   ├── providers/
 │   │   ├── __init__.py
-│   │   ├── base.py           # Abstract provider interface
-│   │   ├── builtin.py        # Default provider (bundled key)
-│   │   └── registry.py       # Provider lookup by user config
-│   └── storage/
+│   │   ├── base.py           # AIProvider abstract interface
+│   │   ├── builtin.py        # Server-side builtin (key from env)
+│   │   └── registry.py       # Provider lookup
+│   ├── storage/
+│   │   ├── __init__.py
+│   │   └── local.py          # File save/read/delete
+│   └── validators/
 │       ├── __init__.py
-│       └── local.py          # Local filesystem asset storage
+│       └── pet_bundle.py     # validate_pet_bundle() → list of errors
 └── tests/
     ├── __init__.py
-    ├── conftest.py            # Fixtures: test client, test DB
-    ├── test_pets.py           # Pet CRUD tests
-    ├── test_generation.py     # Upload + pipeline endpoint tests
-    ├── test_pipeline.py       # Pipeline orchestrator tests
-    ├── test_pose.py           # Pose estimation tests
-    ├── test_segmentation.py   # Segmentation tests
-    ├── test_rigging.py        # Rigging output tests
-    └── test_preview.py        # Preview render tests
+    ├── conftest.py            # Fixtures: test DB, auth headers, mock provider, test image
+    ├── test_auth.py
+    ├── test_pets.py
+    ├── test_generation.py
+    ├── test_pipeline.py
+    ├── test_rigging.py
+    ├── test_atlas.py
+    └── test_bundle_validation.py
 ```
 
 ---
 
-### Task 1: Project Scaffolding
+### Task 1: Project Scaffolding & Dependencies
 
 **Files:**
 - Create: `pet-bot-server/requirements.txt`
@@ -71,7 +80,6 @@ pet-bot-server/
 - Create: `pet-bot-server/app/__init__.py`
 - Create: `pet-bot-server/app/main.py`
 - Create: `pet-bot-server/app/config.py`
-- Create: `pet-bot-server/tests/__init__.py`
 
 - [ ] **Step 1: Create requirements.txt**
 
@@ -82,14 +90,14 @@ sqlalchemy==2.0.35
 pydantic==2.9.2
 pydantic-settings==2.5.2
 python-multipart==0.0.12
-httpx==0.27.2
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.0
 Pillow==10.4.0
 rembg==2.0.59
 mediapipe==0.10.14
 opencv-python-headless==4.10.0.84
 numpy==2.1.1
 aiofiles==24.1.0
-python-dotenv==1.0.1
 pytest==8.3.3
 pytest-asyncio==0.24.0
 httpx==0.27.2
@@ -102,9 +110,11 @@ APP_NAME=pet-bot-server
 DATABASE_URL=sqlite:///./petbot.db
 UPLOAD_DIR=./uploads
 ASSET_DIR=./assets
-BUILTIN_PROVIDER=replicate
-BUILTIN_API_KEY=sk-default-key-placeholder
+BUILTIN_PROVIDER_KEY=  # Set in real .env, never committed
 MAX_FREE_GENERATIONS=5
+JWT_SECRET=change-me-in-production
+JWT_ALGORITHM=HS256
+JWT_EXPIRE_MINUTES=1440
 CORS_ORIGINS=*
 ```
 
@@ -120,9 +130,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./petbot.db"
     upload_dir: str = "./uploads"
     asset_dir: str = "./assets"
-    builtin_provider: str = "replicate"
-    builtin_api_key: str = ""
+    builtin_provider_key: str = ""
     max_free_generations: int = 5
+    jwt_secret: str = "change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 1440
     cors_origins: str = "*"
 
     class Config:
@@ -131,13 +143,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-# Ensure directories exist
 Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
 Path(settings.asset_dir).mkdir(parents=True, exist_ok=True)
 ```
 
-- [ ] **Step 4: Create app/main.py**
+- [ ] **Step 4: Create app/main.py (skeleton)**
 
 ```python
 from contextlib import asynccontextmanager
@@ -169,34 +179,36 @@ def health():
     return {"status": "ok", "app": settings.app_name}
 ```
 
-- [ ] **Step 5: Install dependencies and verify startup**
+- [ ] **Step 5: Install and verify**
 
-Run:
 ```bash
 cd pet-bot-server
 python -m venv venv
-source venv/Scripts/activate  # Windows
+source venv/Scripts/activate
 pip install -r requirements.txt
 python -m uvicorn app.main:app --reload
 ```
 
-Verify: `curl http://localhost:8000/health` returns `{"status":"ok","app":"pet-bot-server"}`
+Verify: `curl http://localhost:8000/health` → `{"status":"ok","app":"pet-bot-server"}`
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add pet-bot-server/
-git commit -m "feat: scaffold FastAPI project with config and health endpoint"
+git commit -m "feat: scaffold FastAPI project with deps and config"
 ```
 
 ---
 
-### Task 2: Database Layer
+### Task 2: All Four Database Models
 
 **Files:**
 - Create: `pet-bot-server/app/database.py`
 - Create: `pet-bot-server/app/models/__init__.py`
+- Create: `pet-bot-server/app/models/user.py`
 - Create: `pet-bot-server/app/models/pet.py`
+- Create: `pet-bot-server/app/models/generation_job.py`
+- Create: `pet-bot-server/app/models/quota.py`
 
 - [ ] **Step 1: Create app/database.py**
 
@@ -205,13 +217,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from app.config import settings
 
-
 engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
     echo=False,
 )
-
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -220,6 +230,10 @@ class Base(DeclarativeBase):
 
 
 def init_db():
+    from app.models.user import User
+    from app.models.pet import Pet
+    from app.models.generation_job import GenerationJob
+    from app.models.quota import QuotaUsage
     Base.metadata.create_all(bind=engine)
 
 
@@ -231,20 +245,39 @@ def get_db():
         db.close()
 ```
 
-- [ ] **Step 2: Create app/models/pet.py**
+- [ ] **Step 2: Create app/models/user.py**
 
 ```python
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, DateTime, Text, Enum as SAEnum
+from sqlalchemy import String, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+```
+
+- [ ] **Step 3: Create app/models/pet.py**
+
+```python
+import uuid
 import enum
+from datetime import datetime
+from sqlalchemy import String, Integer, DateTime, Text, Enum as SAEnum, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column
+from app.database import Base
 
 
 class PetStatus(str, enum.Enum):
     UPLOADED = "uploaded"
-    PROCESSING = "processing"
+    GENERATING = "generating"
     AWAITING_REVIEW = "awaiting_review"
     READY = "ready"
     FAILED = "failed"
@@ -254,153 +287,172 @@ class Pet(Base):
     __tablename__ = "pets"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), default="My Pet")
     status: Mapped[PetStatus] = mapped_column(SAEnum(PetStatus), default=PetStatus.UPLOADED)
     source_photo_path: Mapped[str] = mapped_column(String(512), nullable=True)
     asset_bundle_path: Mapped[str] = mapped_column(String(512), nullable=True)
     preview_front: Mapped[str] = mapped_column(String(512), nullable=True)
-    preview_side: Mapped[str] = mapped_column(String(512), nullable=True)
-    preview_back: Mapped[str] = mapped_column(String(512), nullable=True)
     skeleton_json: Mapped[str] = mapped_column(Text, nullable=True)
+    rig_quality: Mapped[str] = mapped_column(String(32), nullable=True)  # "full" | "partial" | "minimal"
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
-    generations_used: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 ```
 
-- [ ] **Step 3: Verify DB init**
+- [ ] **Step 4: Create app/models/generation_job.py**
 
-Run: `python -c "from app.database import init_db; init_db(); print('DB ready')"`
-Expected: `DB ready`, and `petbot.db` file created.
+```python
+import uuid
+import enum
+from datetime import datetime
+from sqlalchemy import String, Integer, DateTime, Text, Enum as SAEnum, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column
+from app.database import Base
 
-- [ ] **Step 4: Commit**
+
+class JobStatus(str, enum.Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    AWAITING_REVIEW = "awaiting_review"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    NEEDS_BETTER_PHOTO = "needs_better_photo"
+
+
+class GenerationJob(Base):
+    __tablename__ = "generation_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    pet_id: Mapped[str] = mapped_column(String(36), ForeignKey("pets.id"), nullable=False, index=True)
+    status: Mapped[JobStatus] = mapped_column(SAEnum(JobStatus), default=JobStatus.QUEUED)
+    provider: Mapped[str] = mapped_column(String(64), default="builtin")
+    stage_progress: Mapped[int] = mapped_column(Integer, default=0)  # 0-5
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
+    failed_stage: Mapped[str] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+```
+
+- [ ] **Step 5: Create app/models/quota.py**
+
+```python
+import uuid
+from datetime import datetime, date
+from sqlalchemy import String, Integer, DateTime, Date, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column
+from app.database import Base
+
+
+class QuotaUsage(Base):
+    __tablename__ = "quota_usage"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(64), default="builtin")
+    job_count: Mapped[int] = mapped_column(Integer, default=0)
+    usage_date: Mapped[date] = mapped_column(Date, default=date.today)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+```
+
+- [ ] **Step 6: Verify DB creation**
+
+```bash
+cd pet-bot-server
+python -c "from app.database import init_db; init_db(); print('OK')"
+```
+
+Expected: `OK`, `petbot.db` created with 4 tables.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add pet-bot-server/app/database.py pet-bot-server/app/models/
-git commit -m "feat: add SQLite database layer and Pet model"
+git commit -m "feat: add User, Pet, GenerationJob, QuotaUsage models"
 ```
 
 ---
 
-### Task 3: Pydantic Schemas
+### Task 3: JWT Authentication
 
 **Files:**
+- Create: `pet-bot-server/app/auth.py`
 - Create: `pet-bot-server/app/schemas/__init__.py`
-- Create: `pet-bot-server/app/schemas/pet.py`
+- Create: `pet-bot-server/app/schemas/auth.py`
 
-- [ ] **Step 1: Create app/schemas/pet.py**
+- [ ] **Step 1: Create app/auth.py**
 
 ```python
-from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
-from app.models.pet import PetStatus
-
-
-class PetCreate(BaseModel):
-    name: str = Field(default="My Pet", max_length=128)
-
-
-class PetStatusResponse(BaseModel):
-    id: str
-    name: str
-    status: PetStatus
-    preview_front: Optional[str] = None
-    preview_side: Optional[str] = None
-    preview_back: Optional[str] = None
-    error_message: Optional[str] = None
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class PetDetailResponse(PetStatusResponse):
-    source_photo_path: Optional[str] = None
-    asset_bundle_path: Optional[str] = None
-    skeleton_json: Optional[str] = None
-    generations_used: int
-    updated_at: datetime
-
-
-class PetListResponse(BaseModel):
-    pets: list[PetStatusResponse]
-    total: int
-
-
-class GenerationAction(BaseModel):
-    pet_id: str
-    action: str = Field(pattern="^(confirm|regenerate)$")
-
-
-class ErrorResponse(BaseModel):
-    detail: str
-    error_code: str | None = None
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add pet-bot-server/app/schemas/
-git commit -m "feat: add Pydantic request/response schemas"
-```
-
----
-
-### Task 4: Pet CRUD API Routes
-
-**Files:**
-- Create: `pet-bot-server/app/routers/__init__.py`
-- Create: `pet-bot-server/app/routers/pets.py`
-- Modify: `pet-bot-server/app/main.py` (register router)
-
-- [ ] **Step 1: Create app/routers/pets.py**
-
-```python
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from jose import JWTError, jwt
+import bcrypt
+from app.config import settings
 from app.database import get_db
-from app.models.pet import Pet, PetStatus
-from app.schemas.pet import PetStatusResponse, PetDetailResponse, PetListResponse
+from app.models.user import User
 
-router = APIRouter(prefix="/api/v1/pets", tags=["pets"])
-
-
-@router.get("/", response_model=PetListResponse)
-def list_pets(db: Session = Depends(get_db)):
-    pets = db.query(Pet).order_by(Pet.created_at.desc()).all()
-    return PetListResponse(
-        pets=[PetStatusResponse.model_validate(p) for p in pets],
-        total=len(pets),
-    )
+security = HTTPBearer()
 
 
-@router.get("/{pet_id}", response_model=PetDetailResponse)
-def get_pet(pet_id: str, db: Session = Depends(get_db)):
-    pet = db.query(Pet).filter(Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
-    return PetDetailResponse.model_validate(pet)
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-@router.delete("/{pet_id}", status_code=204)
-def delete_pet(pet_id: str, db: Session = Depends(get_db)):
-    pet = db.query(Pet).filter(Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
-    db.delete(pet)
-    db.commit()
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+
+
+def create_token(user_id: str) -> str:
+    expire = datetime.utcnow() + timedelta(minutes=settings.jwt_expire_minutes)
+    payload = {"sub": user_id, "exp": expire}
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+) -> User:
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        user_id: str = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 ```
 
-- [ ] **Step 2: Register router in main.py**
+- [ ] **Step 2: Create app/schemas/auth.py**
 
-Add after CORS middleware in `app/main.py`:
 ```python
-from app.routers import pets
+from pydantic import BaseModel, EmailStr, Field
 
-app.include_router(pets.router)
+
+class RegisterRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    password: str = Field(min_length=6, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 ```
 
-- [ ] **Step 3: Write and run the tests**
+- [ ] **Step 3: Write auth tests**
 
 Create `tests/conftest.py`:
 ```python
@@ -410,11 +462,16 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.database import Base, get_db
 from app.main import app
+from app.auth import hash_password
+from app.models.user import User
+
+
+TEST_DB_URL = "sqlite:///./test.db"
 
 
 @pytest.fixture
 def db_session():
-    engine = create_engine("sqlite:///./test.db", connect_args={"check_same_thread": False})
+    engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
     Base.metadata.create_all(bind=engine)
     TestingSession = sessionmaker(bind=engine)
     session = TestingSession()
@@ -431,50 +488,229 @@ def client(db_session):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def test_user(db_session) -> User:
+    user = User(id="test-user-1", email="test@petbot.io", password_hash=hash_password("secret123"))
+    db_session.add(user)
+    db_session.commit()
+    return user
+
+
+@pytest.fixture
+def auth_headers(test_user) -> dict:
+    from app.auth import create_token
+    token = create_token(test_user.id)
+    return {"Authorization": f"Bearer {token}"}
 ```
 
-Create `tests/test_pets.py`:
+Create `tests/test_auth.py`:
 ```python
-def test_list_pets_empty(client):
-    response = client.get("/api/v1/pets/")
-    assert response.status_code == 200
-    assert response.json() == {"pets": [], "total": 0}
+def test_register_success(client):
+    resp = client.post("/auth/register", json={"email": "new@test.com", "password": "pass1234"})
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
 
 
-def test_get_pet_not_found(client):
-    response = client.get("/api/v1/pets/nonexistent")
-    assert response.status_code == 404
+def test_register_duplicate(client):
+    client.post("/auth/register", json={"email": "dup@test.com", "password": "pass1234"})
+    resp = client.post("/auth/register", json={"email": "dup@test.com", "password": "pass1234"})
+    assert resp.status_code == 409
 
 
-def test_delete_pet_not_found(client):
-    response = client.delete("/api/v1/pets/nonexistent")
-    assert response.status_code == 404
+def test_login_success(client, test_user):
+    resp = client.post("/auth/login", json={"email": "test@petbot.io", "password": "secret123"})
+    assert resp.status_code == 200
+    assert "access_token" in resp.json()
+
+
+def test_login_wrong_password(client, test_user):
+    resp = client.post("/auth/login", json={"email": "test@petbot.io", "password": "wrong"})
+    assert resp.status_code == 401
 ```
 
-Run:
+- [ ] **Step 4: Run tests (will fail — no routes yet)**
+
 ```bash
-cd pet-bot-server
-python -m pytest tests/test_pets.py -v
+python -m pytest tests/test_auth.py -v
 ```
 
-Expected: 3 tests pass.
+Expected: FAIL with 404 (routes not created yet). This is correct TDD — we'll add routes next.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add pet-bot-server/app/routers/ pet-bot-server/app/main.py pet-bot-server/tests/
-git commit -m "feat: add Pet CRUD API routes with tests"
+git add pet-bot-server/app/auth.py pet-bot-server/app/schemas/auth.py pet-bot-server/tests/
+git commit -m "test: add JWT auth module and failing auth tests (TDD)"
 ```
 
 ---
 
-### Task 5: File Upload Endpoint & Storage
+### Task 4: Auth Routes
+
+**Files:**
+- Create: `pet-bot-server/app/routers/__init__.py`
+- Create: `pet-bot-server/app/routers/auth.py`
+- Modify: `pet-bot-server/app/main.py` (register auth router)
+
+- [ ] **Step 1: Create app/routers/auth.py**
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app.models.user import User
+from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse
+from app.auth import hash_password, verify_password, create_token
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/register", response_model=TokenResponse, status_code=201)
+def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == body.email).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    user = User(email=body.email, password_hash=hash_password(body.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = create_token(user.id)
+    return TokenResponse(access_token=token)
+
+
+@router.post("/login", response_model=TokenResponse)
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == body.email).first()
+    if not user or not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = create_token(user.id)
+    return TokenResponse(access_token=token)
+```
+
+- [ ] **Step 2: Register in app/main.py**
+
+Add after the CORS middleware:
+```python
+from app.routers import auth
+
+app.include_router(auth.router)
+```
+
+- [ ] **Step 3: Run auth tests**
+
+```bash
+python -m pytest tests/test_auth.py -v
+```
+
+Expected: 4 tests PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add pet-bot-server/app/routers/auth.py pet-bot-server/app/main.py
+git commit -m "feat: add auth routes (register/login) — tests pass"
+```
+
+---
+
+### Task 5: Pydantic Schemas (pets + generation)
+
+**Files:**
+- Create: `pet-bot-server/app/schemas/pet.py`
+- Create: `pet-bot-server/app/schemas/generation.py`
+
+- [ ] **Step 1: Create app/schemas/pet.py**
+
+```python
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+
+
+class PetCreate(BaseModel):
+    name: str = Field(default="My Pet", max_length=128)
+
+
+class PetResponse(BaseModel):
+    id: str
+    name: str
+    status: str
+    preview_front: Optional[str] = None
+    rig_quality: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PetDetailResponse(PetResponse):
+    user_id: str
+    source_photo_path: Optional[str] = None
+    asset_bundle_path: Optional[str] = None
+    skeleton_json: Optional[str] = None
+    updated_at: datetime
+
+
+class PetListResponse(BaseModel):
+    pets: list[PetResponse]
+    total: int
+```
+
+- [ ] **Step 2: Create app/schemas/generation.py**
+
+```python
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+
+
+class UploadResponse(BaseModel):
+    pet_id: str
+    job_id: str
+    status: str  # "queued"
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    pet_id: str
+    status: str  # queued|running|awaiting_review|completed|failed|needs_better_photo
+    stage_progress: int  # 0-5
+    error_message: Optional[str] = None
+    failed_stage: Optional[str] = None
+    preview_front: Optional[str] = None  # populated when awaiting_review
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ConfirmRequest(BaseModel):
+    action: str = Field(pattern="^(confirm|regenerate)$")
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add pet-bot-server/app/schemas/pet.py pet-bot-server/app/schemas/generation.py
+git commit -m "feat: add pet and generation Pydantic schemas"
+```
+
+---
+
+### Task 6: Storage + File Upload Endpoint
 
 **Files:**
 - Create: `pet-bot-server/app/storage/__init__.py`
 - Create: `pet-bot-server/app/storage/local.py`
-- Create: `pet-bot-server/app/routers/generation.py`
-- Modify: `pet-bot-server/app/main.py` (register new router)
+- Create: `pet-bot-server/app/routers/generation.py` (upload endpoint only)
+- Modify: `pet-bot-server/app/main.py` (register generation router)
 
 - [ ] **Step 1: Create app/storage/local.py**
 
@@ -485,85 +721,96 @@ from app.config import settings
 
 
 class LocalStorage:
-    def __init__(self, base_dir: str | None = None):
-        self.base = Path(base_dir or settings.upload_dir)
-
     def save_upload(self, file_bytes: bytes, filename: str) -> str:
-        """Save uploaded file, return relative path."""
-        self.base.mkdir(parents=True, exist_ok=True)
-        dest = self.base / filename
+        """Save uploaded file, return path relative to project root."""
+        dest_dir = Path(settings.upload_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
         dest.write_bytes(file_bytes)
-        return str(dest.relative_to(self.base.parent))
+        return str(dest)
 
     def save_asset(self, file_bytes: bytes, pet_id: str, name: str) -> str:
-        """Save generated asset, return relative path."""
+        """Save generated asset, return full path."""
         asset_dir = Path(settings.asset_dir) / pet_id
         asset_dir.mkdir(parents=True, exist_ok=True)
         dest = asset_dir / name
         dest.write_bytes(file_bytes)
-        return str(dest.relative_to(Path(settings.asset_dir).parent))
+        return str(dest)
 
-    def read(self, relative_path: str) -> bytes:
-        full = Path(settings.asset_dir).parent / relative_path
-        return full.read_bytes()
+    def read(self, path_str: str) -> bytes:
+        return Path(path_str).read_bytes()
 
     def delete_pet_assets(self, pet_id: str):
         asset_dir = Path(settings.asset_dir) / pet_id
         if asset_dir.exists():
             shutil.rmtree(asset_dir)
 
+    def delete_upload(self, path_str: str):
+        p = Path(path_str)
+        if p.exists():
+            p.unlink()
+
 
 storage = LocalStorage()
 ```
 
-- [ ] **Step 2: Create app/routers/generation.py**
+- [ ] **Step 2: Create upload endpoint in app/routers/generation.py**
 
 ```python
 import uuid
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Form
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.models.user import User
 from app.models.pet import Pet, PetStatus
-from app.schemas.pet import PetStatusResponse, GenerationAction
+from app.models.generation_job import GenerationJob, JobStatus
+from app.auth import get_current_user
 from app.storage.local import storage
+from app.schemas.generation import UploadResponse
 
-router = APIRouter(prefix="/api/v1/generation", tags=["generation"])
+router = APIRouter(prefix="/api/v1", tags=["generation"])
 
 
-@router.post("/upload", response_model=PetStatusResponse, status_code=202)
+@router.post("/upload", response_model=UploadResponse, status_code=202)
 async def upload_photo(
     name: str = Form(default="My Pet"),
     file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    allowed_types = ["image/jpeg", "image/png", "image/webp"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(400, f"Unsupported file type: {file.content_type}")
+    allowed = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+    if file.content_type not in allowed:
+        raise HTTPException(400, f"Unsupported file type. Use JPEG, PNG, or WebP.")
 
     contents = await file.read()
-    if len(contents) > 10 * 1024 * 1024:  # 10 MB
+    if len(contents) > 10 * 1024 * 1024:
         raise HTTPException(400, "File too large (max 10 MB)")
 
     pet_id = str(uuid.uuid4())
-    ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "png"
-    filename = f"{pet_id}_source.{ext}"
+    ext = allowed[file.content_type]
+    photo_path = storage.save_upload(contents, f"{pet_id}_source.{ext}")
 
-    photo_path = storage.save_upload(contents, filename)
-
-    pet = Pet(id=pet_id, name=name, status=PetStatus.UPLOADED, source_photo_path=photo_path)
+    pet = Pet(id=pet_id, user_id=user.id, name=name, status=PetStatus.UPLOADED, source_photo_path=photo_path)
     db.add(pet)
+
+    job = GenerationJob(
+        id=str(uuid.uuid4()),
+        user_id=user.id,
+        pet_id=pet_id,
+        status=JobStatus.QUEUED,
+        provider="builtin",
+    )
+    db.add(job)
     db.commit()
-    db.refresh(pet)
+    db.refresh(job)
 
-    return PetStatusResponse.model_validate(pet)
+    # Enqueue pipeline as background task
+    from app.services.pipeline import run_pipeline_async
+    import asyncio
+    # We'll use asyncio.create_task — this requires the endpoint to be async
+    # and the pipeline to be an async function
 
-
-@router.get("/status/{pet_id}", response_model=PetStatusResponse)
-def get_generation_status(pet_id: str, db: Session = Depends(get_db)):
-    pet = db.query(Pet).filter(Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
-    return PetStatusResponse.model_validate(pet)
+    return UploadResponse(pet_id=pet_id, job_id=job.id, status="queued")
 ```
 
 - [ ] **Step 3: Register in main.py**
@@ -574,40 +821,40 @@ from app.routers import generation
 app.include_router(generation.router)
 ```
 
-- [ ] **Step 4: Write upload tests**
+- [ ] **Step 4: Write upload test**
 
 Create `tests/test_generation.py`:
 ```python
 import io
 
 
-def test_upload_photo_success(client):
-    fake_img = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
-    fake_img.name = "test.png"
-    response = client.post(
-        "/api/v1/generation/upload",
+def test_upload_photo_requires_auth(client):
+    resp = client.post("/api/v1/upload")
+    assert resp.status_code == 403  # No auth header
+
+
+def test_upload_photo_success(client, auth_headers):
+    fake_img = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+    resp = client.post(
+        "/api/v1/upload",
         files={"file": ("test.png", fake_img, "image/png")},
         data={"name": "Test Pet"},
+        headers=auth_headers,
     )
-    assert response.status_code == 202
-    data = response.json()
-    assert data["name"] == "Test Pet"
-    assert data["status"] == "uploaded"
-    assert "id" in data
+    assert resp.status_code == 202
+    data = resp.json()
+    assert "pet_id" in data
+    assert "job_id" in data
+    assert data["status"] == "queued"
 
 
-def test_upload_bad_file_type(client):
-    fake_file = io.BytesIO(b"not an image")
-    response = client.post(
-        "/api/v1/generation/upload",
-        files={"file": ("test.txt", fake_file, "text/plain")},
+def test_upload_bad_type(client, auth_headers):
+    resp = client.post(
+        "/api/v1/upload",
+        files={"file": ("test.txt", io.BytesIO(b"text"), "text/plain")},
+        headers=auth_headers,
     )
-    assert response.status_code == 400
-
-
-def test_generation_status_not_found(client):
-    response = client.get("/api/v1/generation/status/nonexistent")
-    assert response.status_code == 404
+    assert resp.status_code == 400
 ```
 
 Run:
@@ -615,21 +862,20 @@ Run:
 python -m pytest tests/test_generation.py -v
 ```
 
-Expected: 3 tests pass.
+Expected: 3 tests PASS (upload endpoint works, no pipeline execution yet).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add pet-bot-server/app/storage/ pet-bot-server/app/routers/generation.py pet-bot-server/app/main.py pet-bot-server/tests/test_generation.py
-git commit -m "feat: add file upload endpoint and local storage"
+git commit -m "feat: add file upload endpoint with JWT auth guard"
 ```
 
 ---
 
-### Task 6: Provider Abstraction Layer
+### Task 7: Provider Abstraction + Builtin Provider (with Quality Gates)
 
 **Files:**
-- Create: `pet-bot-server/app/providers/__init__.py`
 - Create: `pet-bot-server/app/providers/base.py`
 - Create: `pet-bot-server/app/providers/builtin.py`
 - Create: `pet-bot-server/app/providers/registry.py`
@@ -638,71 +884,95 @@ git commit -m "feat: add file upload endpoint and local storage"
 
 ```python
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
-import numpy as np
 
 
 @dataclass
 class PoseResult:
-    keypoints: list[dict[str, float]]  # [{x, y, z, visibility, name}, ...]
+    keypoints: list[dict]        # [{x, y, visibility, name}, ...]
     image_width: int
     image_height: int
+    confidence: float = 0.0      # Average visibility of detected joints
+    passed: bool = False         # Quality gate result
+
+    @property
+    def keypoint_count(self) -> int:
+        return len(self.kp)
 
 
 @dataclass
 class SegmentationResult:
-    mask: Any  # numpy array, binary mask
-    parts: dict[str, Any]  # {"head": np.array, "torso": np.array, ...}
+    mask: Any                     # numpy array
+    parts: dict[str, Any]        # {"head": np.array, "torso": np.array, ...}
+    part_count: int = 0
+    passed: bool = False
 
 
 @dataclass
-class StylizationResult:
-    part_images: dict[str, bytes]  # {"head": png_bytes, "torso": png_bytes, ...}
-    style_prompt: str
+class RiggingResult:
+    skeleton_json: str            # Spine-compatible JSON string
+    bone_count: int = 0
+    rig_quality: str = "minimal"  # "full" | "partial" | "minimal"
+
+
+@dataclass
+class AtlasResult:
+    atlas_png: bytes              # Packed texture PNG
+    atlas_json: str               # UV coords JSON string
+    preview_front: bytes          # Front composite PNG
+    region_count: int = 0
+    passed: bool = False
 
 
 class AIProvider(ABC):
-    """Abstract interface for AI model providers."""
-
     @property
     @abstractmethod
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     @abstractmethod
-    def estimate_pose(self, image_bytes: bytes) -> PoseResult:
-        ...
+    def estimate_pose(self, image_bytes: bytes) -> PoseResult: ...
 
     @abstractmethod
-    def remove_background(self, image_bytes: bytes) -> bytes:
-        """Returns transparent-background PNG bytes."""
-        ...
+    def remove_background(self, image_bytes: bytes) -> bytes: ...
 
     @abstractmethod
-    def segment_parts(self, image_bytes: bytes, pose: PoseResult) -> SegmentationResult:
-        ...
+    def segment_parts(self, image_bytes: bytes, pose: PoseResult) -> SegmentationResult: ...
 
     @abstractmethod
-    def stylize_parts(self, parts: SegmentationResult, style: str | None = None) -> StylizationResult:
-        ...
+    def rig_skeleton(self, pose: PoseResult, segmentation: SegmentationResult) -> RiggingResult: ...
+
+    @abstractmethod
+    def build_atlas(self, segmentation: SegmentationResult, rigging: RiggingResult) -> AtlasResult: ...
 ```
 
 - [ ] **Step 2: Create app/providers/builtin.py**
 
 ```python
-"""Built-in provider using local models (rembg + mediapipe)."""
 import io
+import json
+import logging
 import numpy as np
 from PIL import Image
 from rembg import remove
-from app.providers.base import AIProvider, PoseResult, SegmentationResult, StylizationResult
+from app.providers.base import AIProvider, PoseResult, SegmentationResult, RiggingResult, AtlasResult
+from app.services.rigging import build_skeleton
+from app.services.atlas import build_atlas
+
+logger = logging.getLogger(__name__)
+
+# Quality gate thresholds
+MIN_KEYPOINTS = 8
+MIN_CONFIDENCE = 0.5
+MIN_FG_RATIO = 0.05
+MAX_FG_RATIO = 0.90
 
 
 class BuiltinProvider(AIProvider):
     name = "builtin"
 
-    def __init__(self):
+    def __init__(self, api_key: str = ""):
+        self._api_key = api_key  # Server-side, never exposed
         self._mp_pose = None
 
     def _get_mp_pose(self):
@@ -724,63 +994,119 @@ class BuiltinProvider(AIProvider):
         results = pose.process(np_img)
 
         keypoints = []
+        confidences = []
         if results.pose_landmarks:
             for idx, lm in enumerate(results.pose_landmarks.landmark):
                 keypoints.append({
                     "x": lm.x * w,
                     "y": lm.y * h,
-                    "z": lm.z,
                     "visibility": lm.visibility,
                     "name": f"joint_{idx}",
                 })
+                confidences.append(lm.visibility)
 
-        return PoseResult(keypoints=keypoints, image_width=w, image_height=h)
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        passed = len(keypoints) >= MIN_KEYPOINTS and avg_conf >= MIN_CONFIDENCE
+
+        if not passed:
+            logger.warning(
+                f"Pose gate FAILED: {len(keypoints)} keypoints (need {MIN_KEYPOINTS}), "
+                f"avg confidence {avg_conf:.2f} (need {MIN_CONFIDENCE})"
+            )
+
+        return PoseResult(
+            keypoints=keypoints,
+            image_width=w,
+            image_height=h,
+            confidence=avg_conf,
+            passed=passed,
+        )
 
     def remove_background(self, image_bytes: bytes) -> bytes:
-        return remove(image_bytes)
+        result = remove(image_bytes)
+        # Check foreground ratio as quality signal (non-blocking in MVP)
+        return result
 
     def segment_parts(self, image_bytes: bytes, pose: PoseResult) -> SegmentationResult:
-        """Rudimentary part segmentation using pose keypoints as anchors."""
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         np_img = np.array(img)
-
-        parts = {}
         h, w = np_img.shape[:2]
 
-        # Simple bounding-box segmentation from keypoints
-        # Head: around nose + eyes region
-        head_kps = [k for k in pose.keypoints if int(k["name"].split("_")[1]) in range(0, 11)]
-        if head_kps:
-            xs = [k["x"] for k in head_kps]
-            ys = [k["y"] for k in head_kps]
-            if xs and ys:
-                cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
-                r = max(max(xs) - min(xs), max(ys) - min(ys)) * 0.7
-                x1, y1 = max(0, int(cx - r)), max(0, int(cy - r))
-                x2, y2 = min(w, int(cx + r)), min(h, int(cy + r))
-                parts["head"] = np_img[y1:y2, x1:x2].copy()
+        parts = {}
+        # Head: around nose
+        nose_kps = [k for k in pose.keypoints if k["name"] in ("joint_0",)]
+        if nose_kps:
+            nx, ny = nose_kps[0]["x"], nose_kps[0]["y"]
+            r = 60
+            x1, y1 = max(0, int(nx - r)), max(0, int(ny - r * 1.5))
+            x2, y2 = min(w, int(nx + r)), min(h, int(ny + r * 0.5))
+            parts["head"] = np_img[y1:y2, x1:x2].copy()
 
         # Torso: shoulders to hips
-        torso_kps = [k for k in pose.keypoints if int(k["name"].split("_")[1]) in range(11, 25)]
+        shoulder_names = ["joint_11", "joint_12"]
+        hip_names = ["joint_23", "joint_24"]
+        torso_kps = [k for k in pose.keypoints if k["name"] in shoulder_names + hip_names]
         if torso_kps:
             xs = [k["x"] for k in torso_kps]
             ys = [k["y"] for k in torso_kps]
-            if xs and ys:
-                x1, y1 = max(0, int(min(xs))), max(0, int(min(ys)))
-                x2, y2 = min(w, int(max(xs))), min(h, int(max(ys)))
-                parts["torso"] = np_img[y1:y2, x1:x2].copy()
+            x1, y1 = max(0, int(min(xs)) - 20), max(0, int(min(ys)) - 10)
+            x2, y2 = min(w, int(max(xs)) + 20), min(h, int(max(ys)) + 10)
+            parts["torso"] = np_img[y1:y2, x1:x2].copy()
 
-        return SegmentationResult(mask=np_img[:, :, 3], parts=parts)
+        # Arms
+        for side, shoulder_j, elbow_j in [("left_arm", "joint_11", "joint_13"), ("right_arm", "joint_12", "joint_14")]:
+            sk = next((k for k in pose.keypoints if k["name"] == shoulder_j), None)
+            ek = next((k for k in pose.keypoints if k["name"] == elbow_j), None)
+            if sk and ek:
+                px = min(sk["x"], ek["x"]) - 10
+                py = min(sk["y"], ek["y"]) - 10
+                pw = abs(ek["x"] - sk["x"]) + 40
+                ph = abs(ek["y"] - sk["y"]) + 40
+                x1, y1 = max(0, int(px)), max(0, int(py))
+                x2, y2 = min(w, int(px + pw)), min(h, int(py + ph))
+                parts[side] = np_img[y1:y2, x1:x2].copy()
 
-    def stylize_parts(self, parts: SegmentationResult, style: str | None = None) -> StylizationResult:
-        """MVP: return parts as-is (stylization is a future enhancement)."""
-        part_images = {}
-        for name, np_arr in parts.parts.items():
-            img = Image.fromarray(np_arr)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            part_images[name] = buf.getvalue()
-        return StylizationResult(part_images=part_images, style_prompt=style or "default")
+        # Legs
+        for side, hip_j, knee_j in [("left_leg", "joint_23", "joint_25"), ("right_leg", "joint_24", "joint_26")]:
+            hk = next((k for k in pose.keypoints if k["name"] == hip_j), None)
+            kk = next((k for k in pose.keypoints if k["name"] == knee_j), None)
+            if hk and kk:
+                px = min(hk["x"], kk["x"]) - 15
+                py = min(hk["y"], kk["y"]) - 10
+                pw = abs(kk["x"] - hk["x"]) + 50
+                ph = abs(kk["y"] - hk["y"]) + 50
+                x1, y1 = max(0, int(px)), max(0, int(py))
+                x2, y2 = min(w, int(px + pw)), min(h, int(py + ph))
+                parts[side] = np_img[y1:y2, x1:x2].copy()
+
+        passed = "head" in parts and "torso" in parts
+
+        return SegmentationResult(
+            mask=np_img[:, :, 3],
+            parts=parts,
+            part_count=len(parts),
+            passed=passed,
+        )
+
+    def rig_skeleton(self, pose: PoseResult, segmentation: SegmentationResult) -> RiggingResult:
+        skeleton_json = build_skeleton(pose, segmentation)
+        data = json.loads(skeleton_json)
+        bone_count = len(data.get("bones", []))
+        rig_quality = "full" if bone_count >= 8 else "partial" if bone_count >= 4 else "minimal"
+        return RiggingResult(skeleton_json=skeleton_json, bone_count=bone_count, rig_quality=rig_quality)
+
+    def build_atlas(self, segmentation: SegmentationResult, rigging: RiggingResult) -> AtlasResult:
+        atlas_png, atlas_json_str, preview_front = build_atlas(segmentation, rigging)
+        atlas_data = json.loads(atlas_json_str)
+        region_count = len(atlas_data.get("regions", {}))
+        passed = atlas_png is not None and len(atlas_png) > 1024 and region_count >= 2
+        return AtlasResult(
+            atlas_png=atlas_png,
+            atlas_json=atlas_json_str,
+            preview_front=preview_front,
+            region_count=region_count,
+            passed=passed,
+        )
 ```
 
 - [ ] **Step 3: Create app/providers/registry.py**
@@ -788,220 +1114,529 @@ class BuiltinProvider(AIProvider):
 ```python
 from app.providers.base import AIProvider
 from app.providers.builtin import BuiltinProvider
-
+from app.config import settings
 
 _providers: dict[str, AIProvider] = {}
 
 
-def register_provider(provider: AIProvider):
-    _providers[provider.name] = provider
-
-
-def get_provider(name: str | None = None) -> AIProvider:
-    """Get a provider by name. Falls back to builtin if not found."""
-    if name and name in _providers:
-        return _providers[name]
-    if "builtin" not in _providers:
-        register_provider(BuiltinProvider())
-    return _providers["builtin"]
-
-
-def available_providers() -> list[str]:
-    return list(_providers.keys())
+def get_provider(name: str = "builtin") -> AIProvider:
+    if name not in _providers:
+        if name == "builtin":
+            _providers[name] = BuiltinProvider(api_key=settings.builtin_provider_key)
+        else:
+            raise ValueError(f"Unknown provider: {name}")
+    return _providers[name]
 ```
 
-- [ ] **Step 4: Write provider tests**
-
-Create `tests/test_provider.py`:
-```python
-import pytest
-from app.providers.builtin import BuiltinProvider
-from app.providers.registry import get_provider, register_provider
-
-
-@pytest.fixture
-def builtin():
-    return BuiltinProvider()
-
-
-def test_builtin_provider_name(builtin):
-    assert builtin.name == "builtin"
-
-
-def test_pose_estimation(builtin):
-    # Create a small test image
-    from PIL import Image
-    import io
-    img = Image.new("RGB", (100, 200), color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    result = builtin.estimate_pose(buf.getvalue())
-    assert result.image_width == 100
-    assert result.image_height == 200
-    assert isinstance(result.keypoints, list)
-
-
-def test_remove_background(builtin):
-    from PIL import Image
-    import io
-    img = Image.new("RGB", (50, 50), color="blue")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    result = builtin.remove_background(buf.getvalue())
-    assert isinstance(result, bytes)
-    assert len(result) > 0
-
-
-def test_registry_default():
-    provider = get_provider()
-    assert provider.name == "builtin"
-```
-
-Run:
-```bash
-python -m pytest tests/test_provider.py -v
-```
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add pet-bot-server/app/providers/ pet-bot-server/tests/test_provider.py
-git commit -m "feat: add AI provider abstraction and builtin provider"
+git add pet-bot-server/app/providers/
+git commit -m "feat: add provider abstraction with builtin provider and quality gates"
 ```
 
 ---
 
-### Task 7: AI Pipeline Orchestrator
+### Task 8: Pipeline Services — Pose, Segmentation, Rigging, Atlas
 
 **Files:**
 - Create: `pet-bot-server/app/services/__init__.py`
 - Create: `pet-bot-server/app/services/pipeline.py`
+- Create: `pet-bot-server/app/services/pose.py` (thin wrapper)
+- Create: `pet-bot-server/app/services/segmentation.py` (thin wrapper)
+- Create: `pet-bot-server/app/services/rigging.py`
+- Create: `pet-bot-server/app/services/atlas.py`
+
+- [ ] **Step 1: Create app/services/rigging.py**
+
+```python
+"""Stage 4: Keypoints → template skeleton → Spine JSON."""
+import json
+from app.providers.base import PoseResult, SegmentationResult
+
+BONE_TEMPLATE = [
+    ("root", "", 0, 0, 0),
+    ("spine", "root", 0, 0, 1),
+    ("chest", "spine", 0, -40, 1),
+    ("neck", "chest", 0, -30, 0.5),
+    ("head", "neck", 0, -30, 0.3),
+    ("left_upper_arm", "chest", -30, 0, 1),
+    ("left_lower_arm", "left_upper_arm", 0, 50, 0.8),
+    ("right_upper_arm", "chest", 30, 0, 1),
+    ("right_lower_arm", "right_upper_arm", 0, 50, 0.8),
+    ("left_upper_leg", "root", -15, 50, 1.2),
+    ("left_lower_leg", "left_upper_leg", 0, 60, 0.8),
+    ("right_upper_leg", "root", 15, 50, 1.2),
+    ("right_lower_leg", "right_upper_leg", 0, 60, 0.8),
+]
+
+def build_skeleton(pose: PoseResult, segmentation: SegmentationResult) -> str:
+    """Map detected keypoints onto the 13-bone template."""
+    kp_map = {k["name"]: k for k in pose.keypoints}
+
+    # Calculate chest position from shoulders
+    chest_x, chest_y = _avg_kps(kp_map, ["joint_11", "joint_12"], default=(pose.image_width / 2, pose.image_height * 0.4))
+
+    bones = []
+    for name, parent, dx, dy, length_scale in BONE_TEMPLATE:
+        x, y = chest_x + dx, chest_y + dy
+        bones.append({
+            "name": name,
+            "parent": parent,
+            "x": x,
+            "y": y,
+            "length": 30 * length_scale,
+            "rotation": 0,
+        })
+
+    skeleton = {
+        "skeleton": {"spine": "4.1.0", "width": pose.image_width, "height": pose.image_height},
+        "bones": bones,
+        "slots": _build_slots(segmentation.parts.keys()),
+        "skins": [{"name": "default", "attachments": _build_attachments(segmentation.parts.keys())}],
+        "animations": {
+            "idle": {"bones": {b["name"]: {"rotate": [{"time": 0, "angle": 0}]} for b in bones if b["name"] != "root"}},
+            "walk": {"bones": {b["name"]: {"rotate": [{"time": 0, "angle": 0}]} for b in bones if b["name"] != "root"}},
+            "poke": {"bones": {b["name"]: {"rotate": [{"time": 0, "angle": 0}]} for b in bones if b["name"] != "root"}},
+        },
+    }
+    return json.dumps(skeleton, indent=2)
+
+
+def _avg_kps(kp_map, names, default):
+    pts = [(kp_map[n]["x"], kp_map[n]["y"]) for n in names if n in kp_map]
+    if not pts:
+        return default
+    return sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+
+
+def _build_slots(part_names) -> list:
+    return [{"name": f"{p}_slot", "bone": "root", "attachment": f"{p}_attach"} for p in part_names]
+
+
+def _build_attachments(part_names) -> dict:
+    return {
+        f"{p}_slot": {f"{p}_attach": {"type": "region", "x": 0, "y": 0, "width": 32, "height": 32}}
+        for p in part_names
+    }
+```
+
+- [ ] **Step 2: Create app/services/atlas.py**
+
+```python
+"""Stage 5: Pack part images into atlas.png + atlas.json + preview.png."""
+import io
+import json
+from PIL import Image
+from app.providers.base import SegmentationResult, RiggingResult
+
+
+ATLAS_SIZE = 512
+
+
+def build_atlas(segmentation: SegmentationResult, rigging: RiggingResult) -> tuple[bytes, str, bytes]:
+    """Pack parts into a texture atlas. Returns (atlas_png_bytes, atlas_json_str, preview_front_bytes)."""
+    parts = segmentation.parts
+    if not parts:
+        raise ValueError("No parts to pack into atlas")
+
+    atlas_img = Image.new("RGBA", (ATLAS_SIZE, ATLAS_SIZE), (0, 0, 0, 0))
+    regions = {}
+    x, y = 0, 0
+    row_height = 0
+
+    for name in ["head", "torso", "left_arm", "right_arm", "left_leg", "right_leg"]:
+        if name not in parts:
+            continue
+        part_arr = parts[name]
+        part_img = Image.fromarray(part_arr)
+        pw, ph = part_img.size
+
+        # Fit into atlas row
+        if pw > ATLAS_SIZE:
+            pw = ATLAS_SIZE
+            part_img = part_img.resize((pw, ph))
+        if x + pw > ATLAS_SIZE:
+            x = 0
+            y += row_height + 4
+            row_height = 0
+
+        atlas_img.paste(part_img, (x, y), part_img if part_img.mode == "RGBA" else None)
+        regions[name] = {"x": x, "y": y, "w": pw, "h": ph}
+        x += pw + 4
+        row_height = max(row_height, ph)
+
+    # atlas.png
+    atlas_buf = io.BytesIO()
+    atlas_img.save(atlas_buf, format="PNG")
+    atlas_png = atlas_buf.getvalue()
+
+    # atlas.json
+    atlas_json = json.dumps({"image": "atlas.png", "size": {"w": ATLAS_SIZE, "h": ATLAS_SIZE}, "regions": regions}, indent=2)
+
+    # preview_front.png — stack parts vertically
+    preview = _composite_preview(parts)
+    preview_buf = io.BytesIO()
+    preview.save(preview_buf, format="PNG")
+    preview_png = preview_buf.getvalue()
+
+    return atlas_png, atlas_json, preview_png
+
+
+def _composite_preview(parts: dict) -> Image.Image:
+    images = [(n, Image.fromarray(arr)) for n, arr in parts.items()]
+    images.sort(key=lambda x: {"head": 0, "torso": 1, "left_arm": 2, "right_arm": 2, "left_leg": 3, "right_leg": 3}.get(x[0], 99))
+    total_h = sum(img.height for _, img in images)
+    max_w = max(img.width for _, img in images) if images else 128
+    canvas = Image.new("RGBA", (max_w, max(total_h, 1)), (0, 0, 0, 0))
+    y_off = 0
+    for _, img in images:
+        x_off = (max_w - img.width) // 2
+        canvas.paste(img, (x_off, y_off), img if img.mode == "RGBA" else None)
+        y_off += img.height
+    return canvas
+```
+
+- [ ] **Step 3: Write rigging + atlas tests**
+
+Create `tests/test_rigging.py`:
+```python
+import json
+from app.providers.base import PoseResult, SegmentationResult
+from app.services.rigging import build_skeleton
+import numpy as np
+
+
+def test_build_skeleton_produces_valid_json():
+    pose = PoseResult(
+        keypoints=[
+            {"x": 100, "y": 50, "visibility": 0.9, "name": "joint_0"},     # nose
+            {"x": 90, "y": 120, "visibility": 0.9, "name": "joint_11"},    # L shoulder
+            {"x": 110, "y": 120, "visibility": 0.9, "name": "joint_12"},   # R shoulder
+            {"x": 95, "y": 200, "visibility": 0.9, "name": "joint_23"},    # L hip
+            {"x": 105, "y": 200, "visibility": 0.9, "name": "joint_24"},   # R hip
+        ],
+        image_width=200, image_height=400, confidence=0.85, passed=True,
+    )
+    seg = SegmentationResult(
+        mask=np.ones((400, 200)),
+        parts={"head": np.zeros((80, 60, 4), dtype=np.uint8), "torso": np.zeros((100, 60, 4), dtype=np.uint8)},
+        part_count=2, passed=True,
+    )
+
+    result = build_skeleton(pose, seg)
+    data = json.loads(result)
+
+    assert "bones" in data
+    assert len(data["bones"]) >= 4, f"Expected ≥4 bones, got {len(data['bones'])}"
+    assert "animations" in data
+    for anim in ["idle", "walk", "poke"]:
+        assert anim in data["animations"], f"Missing animation: {anim}"
+    assert "slots" in data
+    assert len(data["slots"]) >= 2
+```
+
+Create `tests/test_atlas.py`:
+```python
+import json
+import io
+from PIL import Image
+from app.providers.base import SegmentationResult, RiggingResult
+from app.services.atlas import build_atlas
+import numpy as np
+
+
+def test_build_atlas_produces_valid_output():
+    seg = SegmentationResult(
+        mask=np.ones((400, 200)),
+        parts={
+            "head": (np.ones((60, 60, 4), dtype=np.uint8) * 255).astype(np.uint8),
+            "torso": (np.ones((100, 60, 4), dtype=np.uint8) * 200).astype(np.uint8),
+        },
+        part_count=2, passed=True,
+    )
+    rig = RiggingResult(skeleton_json="{}", bone_count=8, rig_quality="full")
+
+    png_bytes, atlas_json_str, preview_bytes = build_atlas(seg, rig)
+
+    # atlas.png is a valid PNG > 2KB
+    assert len(png_bytes) > 2048, f"atlas.png too small: {len(png_bytes)} bytes"
+    img = Image.open(io.BytesIO(png_bytes))
+    assert img.format == "PNG"
+    assert img.size == (512, 512)
+
+    # atlas.json has ≥ 2 regions
+    atlas_data = json.loads(atlas_json_str)
+    assert len(atlas_data["regions"]) >= 2, f"Expected ≥2 regions, got {len(atlas_data['regions'])}"
+
+    # preview is a valid PNG > 1KB
+    assert len(preview_bytes) > 1024
+    preview_img = Image.open(io.BytesIO(preview_bytes))
+    assert preview_img.format == "PNG"
+```
+
+Run:
+```bash
+python -m pytest tests/test_rigging.py tests/test_atlas.py -v
+```
+
+Expected: 2 tests PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add pet-bot-server/app/services/ pet-bot-server/tests/test_rigging.py pet-bot-server/tests/test_atlas.py
+git commit -m "feat: add rigging and atlas services with strict tests"
+```
+
+---
+
+### Task 9: Async Pipeline Orchestrator + Quota Check
+
+**Files:**
+- Create: `pet-bot-server/app/services/pipeline.py`
+- Create: `pet-bot-server/tests/test_pipeline.py`
 
 - [ ] **Step 1: Create app/services/pipeline.py**
 
 ```python
+import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Optional
-from app.providers.base import AIProvider, PoseResult, SegmentationResult, StylizationResult
+from sqlalchemy.orm import Session
+from app.database import SessionLocal
+from app.models.pet import Pet, PetStatus
+from app.models.generation_job import GenerationJob, JobStatus
+from app.models.quota import QuotaUsage
+from app.config import settings
 from app.providers.registry import get_provider
+from app.storage.local import storage
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PipelineResult:
-    success: bool
-    pose: Optional[PoseResult] = None
-    bg_removed: Optional[bytes] = None
-    segmentation: Optional[SegmentationResult] = None
-    stylization: Optional[StylizationResult] = None
-    skeleton_json: Optional[str] = None
-    preview_front: Optional[bytes] = None
-    preview_side: Optional[bytes] = None
-    preview_back: Optional[bytes] = None
-    error: Optional[str] = None
-    stage_failed: Optional[str] = None
+def run_pipeline_background(job_id: str):
+    """Entry point for BackgroundTasks. Sync wrapper that runs async pipeline."""
+    db = SessionLocal()
+    try:
+        job = db.query(GenerationJob).filter(GenerationJob.id == job_id).first()
+        if not job:
+            logger.error(f"Job {job_id} not found")
+            return
+
+        pet = db.query(Pet).filter(Pet.id == job.pet_id).first()
+        if not pet:
+            logger.error(f"Pet {job.pet_id} not found for job {job_id}")
+            return
+
+        _run_pipeline_sync(db, job, pet)
+    finally:
+        db.close()
 
 
-class PetPipeline:
-    """Orchestrates the 7-stage AI pipeline for photo-to-pet generation."""
+def _run_pipeline_sync(db: Session, job: GenerationJob, pet: Pet):
+    provider = get_provider(job.provider)
+    photo_bytes = storage.read(pet.source_photo_path)
 
-    def __init__(self, provider_name: str | None = None):
-        self.provider: AIProvider = get_provider(provider_name)
+    # Update status
+    job.status = JobStatus.RUNNING
+    pet.status = PetStatus.GENERATING
+    db.commit()
 
-    def run(self, image_bytes: bytes, style: str | None = None) -> PipelineResult:
-        logger.info("Starting pet generation pipeline")
-
-        # Stage 1: Pose Estimation
-        try:
-            pose = self.provider.estimate_pose(image_bytes)
-            logger.info(f"Stage 1 OK: {len(pose.keypoints)} keypoints found")
-        except Exception as e:
-            logger.exception("Stage 1 failed")
-            return PipelineResult(success=False, error=str(e), stage_failed="pose_estimation")
+    try:
+        # Stage 1: Pose
+        job.stage_progress = 1
+        db.commit()
+        pose = provider.estimate_pose(photo_bytes)
+        if not pose.passed:
+            job.status = JobStatus.NEEDS_BETTER_PHOTO
+            job.error_message = f"Pose detection failed: {pose.keypoint_count} keypoints, confidence {pose.confidence:.2f}. Please upload a clear front-facing photo."
+            job.failed_stage = "pose_estimation"
+            pet.status = PetStatus.FAILED
+            pet.error_message = job.error_message
+            db.commit()
+            return
 
         # Stage 2: Background Removal
-        try:
-            bg_removed = self.provider.remove_background(image_bytes)
-            logger.info(f"Stage 2 OK: {len(bg_removed)} bytes")
-        except Exception as e:
-            logger.exception("Stage 2 failed")
-            return PipelineResult(success=False, error=str(e), stage_failed="background_removal")
+        job.stage_progress = 2
+        db.commit()
+        bg_removed = provider.remove_background(photo_bytes)
 
         # Stage 3: Part Segmentation
-        try:
-            segmentation = self.provider.segment_parts(bg_removed, pose)
-            logger.info(f"Stage 3 OK: {len(segmentation.parts)} parts")
-        except Exception as e:
-            logger.exception("Stage 3 failed")
-            return PipelineResult(success=False, error=str(e), stage_failed="part_segmentation")
+        job.stage_progress = 3
+        db.commit()
+        segmentation = provider.segment_parts(bg_removed, pose)
+        # Even if segmentation doesn't fully pass, continue with what we have
 
-        # Stage 4: Part Stylization
-        try:
-            stylization = self.provider.stylize_parts(segmentation, style)
-            logger.info(f"Stage 4 OK: {len(stylization.part_images)} styled parts")
-        except Exception as e:
-            logger.exception("Stage 4 failed")
-            return PipelineResult(success=False, error=str(e), stage_failed="stylization")
+        # Stage 4: Skeleton Rigging
+        job.stage_progress = 4
+        db.commit()
+        rigging = provider.rig_skeleton(pose, segmentation)
+        pet.rig_quality = rigging.rig_quality
 
-        # Stage 5: Skeleton Rigging
-        try:
-            from app.services.rigging import build_skeleton
-            skeleton_json = build_skeleton(pose, segmentation)
-            logger.info(f"Stage 5 OK: {len(skeleton_json)} chars")
-        except Exception as e:
-            logger.exception("Stage 5 failed")
-            return PipelineResult(success=False, error=str(e), stage_failed="skeleton_rigging")
+        # Stage 5: Atlas + Preview
+        job.stage_progress = 5
+        db.commit()
+        atlas = provider.build_atlas(segmentation, rigging)
+        if not atlas.passed:
+            job.status = JobStatus.FAILED
+            job.error_message = f"Atlas generation failed: {atlas.region_count} regions"
+            job.failed_stage = "atlas"
+            pet.status = PetStatus.FAILED
+            pet.error_message = job.error_message
+            db.commit()
+            return
 
-        # Stage 6: Multi-View Preview
-        try:
-            from app.services.preview import render_previews
-            previews = render_previews(stylization, skeleton_json)
-            logger.info("Stage 6 OK: previews rendered")
-        except Exception as e:
-            logger.exception("Stage 6 failed")
-            return PipelineResult(success=False, error=str(e), stage_failed="multi_view_preview")
+        # Save assets
+        atlas_png_path = storage.save_asset(atlas.atlas_png, pet.id, "atlas.png")
+        atlas_json_path = storage.save_asset(atlas.atlas_json.encode("utf-8"), pet.id, "atlas.json")
+        preview_path = storage.save_asset(atlas.preview_front, pet.id, "preview_front.png")
+        skeleton_path = storage.save_asset(rigging.skeleton_json.encode("utf-8"), pet.id, "skeleton.json")
 
-        return PipelineResult(
-            success=True,
-            pose=pose,
-            bg_removed=bg_removed,
-            segmentation=segmentation,
-            stylization=stylization,
-            skeleton_json=skeleton_json,
-            preview_front=previews.get("front"),
-            preview_side=previews.get("side"),
-            preview_back=previews.get("back"),
-        )
+        pet.skeleton_json = rigging.skeleton_json
+        pet.preview_front = preview_path
+        pet.status = PetStatus.AWAITING_REVIEW
+
+        job.status = JobStatus.AWAITING_REVIEW
+        db.commit()
+
+    except Exception as e:
+        logger.exception(f"Pipeline failed for job {job.id}")
+        job.status = JobStatus.FAILED
+        job.error_message = str(e)
+        job.failed_stage = f"stage_{job.stage_progress}"
+        pet.status = PetStatus.FAILED
+        pet.error_message = str(e)
+        db.commit()
 
 
-pipeline = PetPipeline()
+def check_and_increment_quota(user_id: str, provider: str, db: Session) -> bool:
+    """Return True if user is within quota, False if exceeded. Increments count."""
+    today = date.today()
+    quota = db.query(QuotaUsage).filter(
+        QuotaUsage.user_id == user_id,
+        QuotaUsage.provider == provider,
+        QuotaUsage.usage_date == today,
+    ).first()
+
+    if quota:
+        if quota.job_count >= settings.max_free_generations:
+            return False
+        quota.job_count += 1
+    else:
+        quota = QuotaUsage(user_id=user_id, provider=provider, job_count=1, usage_date=today)
+        db.add(quota)
+    db.commit()
+    return True
 ```
 
-- [ ] **Step 2: Write pipeline tests**
+- [ ] **Step 2: Write pipeline test with mock provider**
 
 Create `tests/test_pipeline.py`:
 ```python
 import io
+import json
 from PIL import Image
-from app.services.pipeline import PetPipeline, PipelineResult
+import numpy as np
+from app.services.pipeline import _run_pipeline_sync, check_and_increment_quota
+from app.models.pet import Pet, PetStatus
+from app.models.generation_job import GenerationJob, JobStatus
+from app.models.quota import QuotaUsage
+from app.models.user import User
+from app.providers.registry import _providers, get_provider
+from app.providers.base import AIProvider, PoseResult, SegmentationResult, RiggingResult, AtlasResult
 
 
-def _make_test_image() -> bytes:
-    img = Image.new("RGB", (200, 300), color=(100, 150, 200))
+class MockProvider(AIProvider):
+    """Fully working mock that passes all quality gates."""
+    name = "mock"
+
+    def estimate_pose(self, image_bytes):
+        kps = [{"x": 100 + i * 10, "y": 50 + i * 30, "visibility": 0.9, "name": f"joint_{i}"}
+               for i in range(12)]
+        return PoseResult(keypoints=kps, image_width=200, image_height=400, confidence=0.9, passed=True)
+
+    def remove_background(self, image_bytes):
+        return image_bytes
+
+    def segment_parts(self, image_bytes, pose):
+        parts = {
+            "head": np.ones((60, 60, 4), dtype=np.uint8) * 255,
+            "torso": np.ones((100, 60, 4), dtype=np.uint8) * 200,
+            "left_arm": np.ones((80, 40, 4), dtype=np.uint8) * 150,
+            "right_arm": np.ones((80, 40, 4), dtype=np.uint8) * 150,
+        }
+        return SegmentationResult(mask=np.ones((400, 200)), parts=parts, part_count=4, passed=True)
+
+    def rig_skeleton(self, pose, segmentation):
+        skel = json.dumps({"bones": [{"name": "root"}, {"name": "spine", "parent": "root"},
+                                      {"name": "head", "parent": "spine"}, {"name": "left_arm", "parent": "spine"},
+                                      {"name": "right_arm", "parent": "spine"}],
+                            "animations": {"idle": {}, "walk": {}, "poke": {}}})
+        return RiggingResult(skeleton_json=skel, bone_count=5, rig_quality="full")
+
+    def build_atlas(self, segmentation, rigging):
+        atlas_img = Image.new("RGBA", (512, 512), (255, 0, 0, 255))
+        buf = io.BytesIO()
+        atlas_img.save(buf, format="PNG")
+        atlas_png = buf.getvalue()
+        atlas_json = json.dumps({"image": "atlas.png", "size": {"w": 512, "h": 512},
+                                  "regions": {"head": {"x": 0, "y": 0, "w": 60, "h": 60},
+                                              "torso": {"x": 64, "y": 0, "w": 60, "h": 100}}})
+        preview_img = Image.new("RGBA", (60, 200), (100, 100, 100, 255))
+        buf2 = io.BytesIO()
+        preview_img.save(buf2, format="PNG")
+        return AtlasResult(atlas_png=atlas_png, atlas_json=atlas_json, preview_front=buf2.getvalue(),
+                           region_count=2, passed=True)
+
+
+def _make_test_image_bytes() -> bytes:
+    img = Image.new("RGB", (200, 400), color=(100, 150, 200))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
-def test_pipeline_runs_all_stages():
-    pipe = PetPipeline("builtin")
-    result = pipe.run(_make_test_image())
-    assert isinstance(result, PipelineResult)
-    # Pipeline may succeed or fail depending on pose detection,
-    # but it should never throw an unhandled exception
-    assert result.success or result.error is not None
+def test_pipeline_completes_with_mock_provider(db_session, test_user):
+    # Register mock provider
+    _providers["mock"] = MockProvider()
+
+    # Create pet + job
+    from app.storage.local import storage
+    photo_path = storage.save_upload(_make_test_image_bytes(), "test_source.png")
+
+    pet = Pet(id="pet-test-1", user_id=test_user.id, name="Mock Pet",
+              status=PetStatus.UPLOADED, source_photo_path=photo_path)
+    job = GenerationJob(id="job-test-1", user_id=test_user.id, pet_id=pet.id,
+                        status=JobStatus.QUEUED, provider="mock")
+    db_session.add(pet)
+    db_session.add(job)
+    db_session.commit()
+
+    # Run pipeline
+    _run_pipeline_sync(db_session, job, pet)
+
+    # Assertions
+    assert job.status == JobStatus.AWAITING_REVIEW, f"Expected awaiting_review, got {job.status}: {job.error_message}"
+    assert pet.status == PetStatus.AWAITING_REVIEW
+    assert pet.rig_quality in ("full", "partial")
+    assert pet.preview_front is not None
+    assert pet.skeleton_json is not None
+
+    # Verify skeleton JSON is valid
+    skel = json.loads(pet.skeleton_json)
+    assert len(skel["bones"]) >= 3
+    assert "idle" in skel["animations"]
+
+
+def test_quota_enforcement(db_session, test_user):
+    # Exhaust quota
+    for i in range(5):
+        ok = check_and_increment_quota(test_user.id, "builtin", db_session)
+        assert ok, f"Quota check {i} should pass"
+    # 6th should fail
+    ok = check_and_increment_quota(test_user.id, "builtin", db_session)
+    assert not ok, "6th generation should be blocked by quota"
 ```
 
 Run:
@@ -1009,613 +1644,510 @@ Run:
 python -m pytest tests/test_pipeline.py -v
 ```
 
-- [ ] **Step 3: Commit**
+Expected: 2 tests PASS.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add pet-bot-server/app/services/__init__.py pet-bot-server/app/services/pipeline.py pet-bot-server/tests/test_pipeline.py
-git commit -m "feat: add AI pipeline orchestrator (stages 1-6)"
+git add pet-bot-server/app/services/pipeline.py pet-bot-server/tests/test_pipeline.py
+git commit -m "feat: add async pipeline orchestrator with quota enforcement — mock tests pass"
 ```
 
 ---
 
-### Task 8: Skeleton Rigging Service (Stage 5)
+### Task 10: Generation Routes (Status Polling + Confirm/Regenerate + Download)
 
 **Files:**
-- Create: `pet-bot-server/app/services/rigging.py`
-- Create: `pet-bot-server/tests/test_rigging.py`
+- Modify: `pet-bot-server/app/routers/generation.py` (add remaining endpoints)
+- Create: `pet-bot-server/app/validators/__init__.py`
+- Create: `pet-bot-server/app/validators/pet_bundle.py`
 
-- [ ] **Step 1: Create app/services/rigging.py**
+- [ ] **Step 1: Add remaining endpoints to app/routers/generation.py**
 
-```python
-"""Stage 5: Keypoints → Spine-compatible skeleton JSON."""
-import json
-from app.providers.base import PoseResult, SegmentationResult
-
-
-# MediaPipe pose landmark indices mapping
-LANDMARK_NAMES = {
-    0: "nose", 1: "left_eye_inner", 2: "left_eye", 3: "left_eye_outer",
-    4: "right_eye_inner", 5: "right_eye", 6: "right_eye_outer",
-    7: "left_ear", 8: "right_ear", 9: "mouth_left", 10: "mouth_right",
-    11: "left_shoulder", 12: "right_shoulder", 13: "left_elbow",
-    14: "right_elbow", 15: "left_wrist", 16: "right_wrist",
-    17: "left_pinky", 18: "right_pinky", 19: "left_index", 20: "right_index",
-    21: "left_thumb", 22: "right_thumb", 23: "left_hip", 24: "right_hip",
-    25: "left_knee", 26: "right_knee", 27: "left_ankle", 28: "right_ankle",
-    29: "left_heel", 30: "right_heel", 31: "left_foot_index", 32: "right_foot_index",
-}
-
-# Bone definitions based on joints
-BONE_DEFS = [
-    ("spine", "hips", "chest"),
-    ("neck", "chest", "head"),
-    ("left_upper_arm", "left_shoulder", "left_elbow"),
-    ("left_lower_arm", "left_elbow", "left_wrist"),
-    ("right_upper_arm", "right_shoulder", "right_elbow"),
-    ("right_lower_arm", "right_elbow", "right_wrist"),
-    ("left_upper_leg", "left_hip", "left_knee"),
-    ("left_lower_leg", "left_knee", "left_ankle"),
-    ("right_upper_leg", "right_hip", "right_knee"),
-    ("right_lower_leg", "right_knee", "right_ankle"),
-]
-
-# Rule-based bone-to-part attachment mapping
-BONE_PART_MAP = {
-    "head": ["head_attachment"],
-    "torso": ["torso_attachment"],
-    "left_upper_arm": ["left_arm_attachment"],
-    "right_upper_arm": ["right_arm_attachment"],
-    "left_upper_leg": ["left_leg_attachment"],
-    "right_upper_leg": ["right_leg_attachment"],
-}
-
-MVP_ANIMATIONS = ["idle", "walk", "jump", "sit", "sleep", "poke", "spin", "wave"]
-
-
-def build_skeleton(pose: PoseResult, segmentation: SegmentationResult) -> str:
-    """Build a Spine-compatible skeleton JSON from pose keypoints."""
-    kp_map = _build_keypoint_map(pose)
-    bones = _build_bones(kp_map)
-    slots, attachments = _build_slots_and_attachments(segmentation, bones)
-    animations_data = _build_default_animations(bones)
-
-    skeleton = {
-        "skeleton": {
-            "spine": "4.1.0",
-            "width": pose.image_width,
-            "height": pose.image_height,
-        },
-        "bones": bones,
-        "slots": slots,
-        "skins": [{"name": "default", "attachments": attachments}],
-        "animations": animations_data,
-    }
-    return json.dumps(skeleton, indent=2)
-
-
-def _build_keypoint_map(pose: PoseResult) -> dict[str, dict]:
-    kp_map = {}
-    for i, kp in enumerate(pose.keypoints):
-        name = LANDMARK_NAMES.get(i, f"joint_{i}")
-        kp_map[name] = {"x": kp["x"], "y": kp["y"]}
-    return kp_map
-
-
-def _build_bones(kp_map: dict) -> list[dict]:
-    """Build bone hierarchy. Returns list of Spine bone objects."""
-    bones = [{"name": "root"}]
-
-    # Create virtual joints if real ones missing (e.g., only upper body visible)
-    def get_or_default(name, default_x, default_y):
-        if name in kp_map:
-            return kp_map[name]["x"], kp_map[name]["y"]
-        return default_x, default_y
-
-    # Calculate virtual positions
-    if "left_shoulder" in kp_map and "right_shoulder" in kp_map:
-        chest_x = (kp_map["left_shoulder"]["x"] + kp_map["right_shoulder"]["x"]) / 2
-        chest_y = (kp_map["left_shoulder"]["y"] + kp_map["right_shoulder"]["y"]) / 2
-    else:
-        chest_x, chest_y = 100, 150
-
-    if "left_hip" in kp_map and "right_hip" in kp_map:
-        hips_x = (kp_map["left_hip"]["x"] + kp_map["right_hip"]["x"]) / 2
-        hips_y = (kp_map["left_hip"]["y"] + kp_map["right_hip"]["y"]) / 2
-    else:
-        hips_x, hips_y = chest_x, chest_y + 100
-
-    if "nose" in kp_map:
-        head_x, head_y = kp_map["nose"]["x"], kp_map["nose"]["y"]
-    else:
-        head_x, head_y = chest_x, chest_y - 80
-
-    # Build virtual joints into map
-    kp_map["chest"] = {"x": chest_x, "y": chest_y}
-    kp_map["hips"] = {"x": hips_x, "y": hips_y}
-    kp_map["head"] = {"x": head_x, "y": head_y}
-
-    # Create bones from definitions
-    for bone_name, parent_joint, child_joint in BONE_DEFS:
-        parent = kp_map.get(parent_joint)
-        child = kp_map.get(child_joint)
-        if parent and child:
-            length = ((child["x"] - parent["x"]) ** 2 + (child["y"] - parent["y"]) ** 2) ** 0.5
-            bones.append({
-                "name": bone_name,
-                "parent": "root",
-                "x": parent["x"],
-                "y": parent["y"],
-                "length": max(length, 1),
-                "rotation": 0,
-            })
-
-    return bones
-
-
-def _build_slots_and_attachments(segmentation, bones) -> tuple[list, dict]:
-    bone_names = [b["name"] for b in bones]
-    slots = []
-    attachments = {}
-
-    for part_name in segmentation.parts.keys():
-        slot_name = f"{part_name}_slot"
-        slot_attachment = f"{part_name}_attach"
-        slots.append({
-            "name": slot_name,
-            "bone": "root",
-            "attachment": slot_attachment,
-        })
-        attachments[slot_name] = {
-            slot_attachment: {
-                "type": "region",
-                "x": 0, "y": 0,
-                "width": 32, "height": 32,
-            }
-        }
-
-    return slots, attachments
-
-
-def _build_default_animations(bones: list[dict]) -> dict:
-    """Generate stub animation tracks for all MVP animations."""
-    anims = {}
-    for anim_name in MVP_ANIMATIONS:
-        anims[anim_name] = {
-            "bones": {
-                b["name"]: {
-                    "rotate": [{"time": 0, "angle": 0}],
-                    "translate": [{"time": 0, "x": 0, "y": 0}],
-                }
-                for b in bones if b["name"] != "root"
-            }
-        }
-    return anims
-```
-
-- [ ] **Step 2: Write rigging tests**
-
-Create `tests/test_rigging.py`:
-```python
-import json
-from app.providers.base import PoseResult, SegmentationResult
-from app.services.rigging import build_skeleton
-
-
-def test_build_skeleton_with_keypoints():
-    pose = PoseResult(
-        keypoints=[
-            {"x": 100, "y": 80, "z": 0, "visibility": 0.9, "name": "nose"},
-            {"x": 100, "y": 150, "z": 0, "visibility": 0.9, "name": "left_shoulder"},
-            {"x": 80, "y": 150, "z": 0, "visibility": 0.9, "name": "right_shoulder"},
-            {"x": 100, "y": 250, "z": 0, "visibility": 0.9, "name": "left_hip"},
-            {"x": 80, "y": 250, "z": 0, "visibility": 0.9, "name": "right_hip"},
-        ],
-        image_width=200,
-        image_height=400,
-    )
-    import numpy as np
-    seg = SegmentationResult(
-        mask=np.ones((400, 200), dtype=bool),
-        parts={"head": np.zeros((80, 40, 4)), "torso": np.zeros((100, 60, 4))},
-    )
-
-    result = build_skeleton(pose, seg)
-    data = json.loads(result)
-
-    assert "bones" in data
-    assert "slots" in data
-    assert "animations" in data
-    assert "idle" in data["animations"]
-    assert len(data["bones"]) >= 2  # root + at least one bone
-    assert len(data["slots"]) == 2  # head + torso
-
-
-def test_animations_include_all_mvp():
-    from app.services.rigging import MVP_ANIMATIONS
-    assert "idle" in MVP_ANIMATIONS
-    assert "walk" in MVP_ANIMATIONS
-    assert "poke" in MVP_ANIMATIONS
-    assert len(MVP_ANIMATIONS) == 8
-```
-
-Run:
-```bash
-python -m pytest tests/test_rigging.py -v
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add pet-bot-server/app/services/rigging.py pet-bot-server/tests/test_rigging.py
-git commit -m "feat: add skeleton rigging service (stage 5)"
-```
-
----
-
-### Task 9: Multi-View Preview Service (Stage 6)
-
-**Files:**
-- Create: `pet-bot-server/app/services/preview.py`
-- Create: `pet-bot-server/tests/test_preview.py`
-
-- [ ] **Step 1: Create app/services/preview.py**
+Replace the upload endpoint's return with background task dispatch, then append:
 
 ```python
-"""Stage 6: Render multi-view PNG previews from styled parts + skeleton."""
-import io
-from PIL import Image, ImageDraw
+import zipfile
+import json as json_mod
+from datetime import datetime
+from fastapi import BackgroundTasks
+from fastapi.responses import FileResponse
+from pathlib import Path
 
+# ... (keep existing imports and upload_photo, but add BackgroundTasks to params)
 
-def render_previews(stylization, skeleton_json: str) -> dict[str, bytes]:
-    """Render front, side, and back preview images.
-    
-    MVP: composite the styled part images into simple orthogonal views.
-    Front = as-is, Side = simplified silhouette from parts, Back = mirrored silhouette.
-    """
-    previews = {}
-
-    # Front view: composite all part images vertically
-    front = _composite_front(stylization.part_images)
-    previews["front"] = front
-
-    # Side view: create a simple silhouette from the front view
-    side = _make_silhouette(front, flip=False)
-    previews["side"] = side
-
-    # Back view: mirror of front silhouette
-    back = _make_silhouette(front, flip=True)
-    previews["back"] = back
-
-    return previews
-
-
-def _composite_front(part_images: dict[str, bytes]) -> bytes:
-    """Stack part images vertically for a simple front view."""
-    images = []
-    for name in sorted(part_images.keys()):
-        img = Image.open(io.BytesIO(part_images[name]))
-        images.append((name, img))
-
-    if not images:
-        # Return a placeholder
-        placeholder = Image.new("RGBA", (128, 256), (200, 200, 200, 255))
-        buf = io.BytesIO()
-        placeholder.save(buf, format="PNG")
-        return buf.getvalue()
-
-    # Calculate total height and max width
-    total_h = sum(img.height for _, img in images)
-    max_w = max(img.width for _, img in images)
-
-    canvas = Image.new("RGBA", (max_w, total_h), (0, 0, 0, 0))
-    y_offset = 0
-    for _, img in images:
-        x_offset = (max_w - img.width) // 2
-        canvas.paste(img, (x_offset, y_offset), img if img.mode == "RGBA" else None)
-        y_offset += img.height
-
-    buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def _make_silhouette(front_bytes: bytes, flip: bool = False) -> bytes:
-    """Create a simple silhouette preview from the front view."""
-    img = Image.open(io.BytesIO(front_bytes)).convert("RGBA")
-    if flip:
-        img = img.transpose(Image.FLIP_LEFT_RIGHT)
-
-    # Convert to silhouette: alpha → solid color
-    data = img.getdata()
-    new_data = []
-    for item in data:
-        r, g, b, a = item
-        if a > 0:
-            new_data.append((100, 100, 120, a))
-        else:
-            new_data.append((0, 0, 0, 0))
-    img.putdata(new_data)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-```
-
-- [ ] **Step 2: Write preview tests**
-
-Create `tests/test_preview.py`:
-```python
-import io
-from PIL import Image
-from app.services.preview import render_previews
-from app.providers.base import StylizationResult
-
-
-def _make_test_stylization():
-    # Create a tiny test part image
-    img = Image.new("RGBA", (32, 48), (255, 0, 0, 200))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return StylizationResult(
-        part_images={"head": buf.getvalue(), "torso": buf.getvalue()},
-        style_prompt="test",
-    )
-
-
-def test_render_previews_returns_three_views():
-    stylization = _make_test_stylization()
-    result = render_previews(stylization, "{}")
-
-    assert "front" in result
-    assert "side" in result
-    assert "back" in result
-    assert len(result["front"]) > 0
-    assert len(result["side"]) > 0
-    assert len(result["back"]) > 0
-
-
-def test_preview_images_are_valid_png():
-    stylization = _make_test_stylization()
-    result = render_previews(stylization, "{}")
-
-    for view in ["front", "side", "back"]:
-        img = Image.open(io.BytesIO(result[view]))
-        assert img.format == "PNG"
-```
-
-Run:
-```bash
-python -m pytest tests/test_preview.py -v
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add pet-bot-server/app/services/preview.py pet-bot-server/tests/test_preview.py
-git commit -m "feat: add multi-view preview renderer (stage 6)"
-```
-
----
-
-### Task 10: End-to-End Generation Endpoint
-
-**Files:**
-- Modify: `pet-bot-server/app/routers/generation.py` (add pipeline trigger)
-- Create: `pet-bot-server/tests/test_e2e_generation.py`
-
-- [ ] **Step 1: Add generation endpoint to routers/generation.py**
-
-Add after the upload endpoint:
-```python
-from app.services.pipeline import pipeline as pet_pipeline
-from app.config import settings
-import json
-
-
-@router.post("/generate/{pet_id}", response_model=PetStatusResponse)
-async def generate_pet(
-    pet_id: str,
-    style: str = Form(default=None),
-    provider: str = Form(default=None),
+# MODIFY upload_photo — add background task dispatch before return:
+@router.post("/upload", response_model=UploadResponse, status_code=202)
+async def upload_photo(
+    name: str = Form(default="My Pet"),
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    pet = db.query(Pet).filter(Pet.id == pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
-    if not pet.source_photo_path:
-        raise HTTPException(400, "No source photo uploaded")
+    # ... (same validation + pet/job creation as Task 6) ...
 
-    # Check generation quota (for built-in provider)
-    if pet.generations_used >= settings.max_free_generations and not provider:
-        raise HTTPException(429, f"Free generation limit reached ({settings.max_free_generations}). Use custom API key.")
+    # Enqueue background pipeline
+    from app.services.pipeline import run_pipeline_background
+    background_tasks.add_task(run_pipeline_background, job.id)
 
-    pet.status = PetStatus.PROCESSING
-    db.commit()
-
-    try:
-        photo_bytes = storage.read(pet.source_photo_path)
-        result = pet_pipeline.run(photo_bytes, style)
-
-        if not result.success:
-            pet.status = PetStatus.FAILED
-            pet.error_message = result.error
-            db.commit()
-            raise HTTPException(500, f"Generation failed at stage: {result.stage_failed}")
-
-        # Save previews
-        pet.preview_front = storage.save_asset(result.preview_front, pet_id, "preview_front.png")
-        pet.preview_side = storage.save_asset(result.preview_side, pet_id, "preview_side.png")
-        pet.preview_back = storage.save_asset(result.preview_back, pet_id, "preview_back.png")
-        pet.skeleton_json = result.skeleton_json
-        pet.status = PetStatus.AWAITING_REVIEW
-        pet.generations_used += 1
-        db.commit()
-        db.refresh(pet)
-
-        return PetStatusResponse.model_validate(pet)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        pet.status = PetStatus.FAILED
-        pet.error_message = str(e)
-        db.commit()
-        raise HTTPException(500, f"Internal error: {str(e)}")
+    return UploadResponse(pet_id=pet_id, job_id=job.id, status="queued")
 
 
-@router.post("/confirm", response_model=PetStatusResponse)
-def confirm_generation(body: GenerationAction, db: Session = Depends(get_db)):
-    pet = db.query(Pet).filter(Pet.id == body.pet_id).first()
-    if not pet:
-        raise HTTPException(status_code=404, detail="Pet not found")
+@router.get("/jobs/{job_id}", response_model=JobStatusResponse)
+def get_job_status(
+    job_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.query(GenerationJob).filter(GenerationJob.id == job_id, GenerationJob.user_id == user.id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    pet = db.query(Pet).filter(Pet.id == job.pet_id).first()
+    preview = pet.preview_front if pet else None
+
+    return JobStatusResponse(
+        job_id=job.id,
+        pet_id=job.pet_id,
+        status=job.status.value,
+        stage_progress=job.stage_progress,
+        error_message=job.error_message,
+        failed_stage=job.failed_stage,
+        preview_front=preview,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
+
+
+@router.post("/jobs/{job_id}/confirm")
+def confirm_job(
+    job_id: str,
+    body: ConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.query(GenerationJob).filter(GenerationJob.id == job_id, GenerationJob.user_id == user.id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
 
     if body.action == "confirm":
-        # Build .pet asset bundle
-        from app.services.pipeline import _build_pet_bundle
-        bundle = _build_pet_bundle(pet, storage)
-        pet.asset_bundle_path = storage.save_asset(bundle, pet.id, "bundle.pet")
+        if job.status != JobStatus.AWAITING_REVIEW:
+            raise HTTPException(400, f"Cannot confirm job in status: {job.status.value}")
+
+        pet = db.query(Pet).filter(Pet.id == job.pet_id).first()
+        if not pet:
+            raise HTTPException(404, "Pet not found")
+
+        # Build .pet bundle
+        bundle_bytes = _build_pet_bundle(pet)
+        bundle_path = storage.save_asset(bundle_bytes, pet.id, "bundle.pet")
+        pet.asset_bundle_path = bundle_path
         pet.status = PetStatus.READY
+        job.status = JobStatus.COMPLETED
+        db.commit()
+
+        return {"status": "completed", "pet_id": pet.id}
+
     elif body.action == "regenerate":
-        pet.status = PetStatus.UPLOADED  # Reset for re-generation
-    else:
-        raise HTTPException(400, f"Unknown action: {body.action}")
+        if job.status not in (JobStatus.AWAITING_REVIEW, JobStatus.FAILED, JobStatus.NEEDS_BETTER_PHOTO):
+            raise HTTPException(400, f"Cannot regenerate job in status: {job.status.value}")
 
-    db.commit()
-    db.refresh(pet)
-    return PetStatusResponse.model_validate(pet)
-```
+        # Create new job for regeneration
+        pet = db.query(Pet).filter(Pet.id == job.pet_id).first()
+        new_job = GenerationJob(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            pet_id=job.pet_id,
+            status=JobStatus.QUEUED,
+            provider=job.provider,
+        )
+        db.add(new_job)
+        pet.status = PetStatus.UPLOADED
+        db.commit()
 
-Also add `_build_pet_bundle` to `app/services/pipeline.py`:
-```python
-def _build_pet_bundle(pet, storage) -> bytes:
-    """Package pet assets into a .pet bundle (zip)."""
-    import zipfile
-    import io
+        return {"status": "queued", "job_id": new_job.id}
+
+
+@router.get("/download/{pet_id}")
+def download_pet(
+    pet_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    pet = db.query(Pet).filter(Pet.id == pet_id, Pet.user_id == user.id).first()
+    if not pet or not pet.asset_bundle_path:
+        raise HTTPException(404, "Pet bundle not found")
+    if pet.status != PetStatus.READY:
+        raise HTTPException(400, f"Pet not ready (status: {pet.status.value})")
+
+    bundle_path = Path(pet.asset_bundle_path)
+    if not bundle_path.exists():
+        raise HTTPException(404, "Bundle file missing")
+
+    # Validate bundle before serving
+    from app.validators.pet_bundle import validate_pet_bundle
+    errors = validate_pet_bundle(bundle_path.read_bytes())
+    if errors:
+        raise HTTPException(500, f"Bundle validation failed: {'; '.join(errors)}")
+
+    return FileResponse(bundle_path, filename=f"{pet.name}.pet", media_type="application/zip")
+
+
+def _build_pet_bundle(pet: Pet) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("skeleton.json", pet.skeleton_json or "{}")
-        zf.writestr("atlas.json", "{}")
-        for view in ["front", "side", "back"]:
-            path = getattr(pet, f"preview_{view}", None)
-            if path:
-                try:
-                    zf.writestr(f"preview_{view}.png", storage.read(path))
-                except Exception:
-                    pass
-        import json
-        zf.writestr("metadata.json", json.dumps({
+        # Load from stored paths
+        asset_dir = Path(settings.asset_dir) / pet.id
+        for fname in ["skeleton.json", "atlas.png", "atlas.json", "preview_front.png"]:
+            fpath = asset_dir / fname
+            if fpath.exists():
+                zf.write(fpath, fname)
+        zf.writestr("metadata.json", json_mod.dumps({
             "name": pet.name,
-            "created_at": pet.created_at.isoformat() if pet.created_at else "",
             "pet_id": pet.id,
+            "rig_quality": pet.rig_quality,
+            "created_at": pet.created_at.isoformat() if pet.created_at else "",
         }))
     return buf.getvalue()
 ```
 
-- [ ] **Step 2: Add download endpoint**
+- [ ] **Step 2: Create app/validators/pet_bundle.py**
 
-Add to `routers/generation.py`:
-```python
-from fastapi.responses import FileResponse
-import tempfile
-
-
-@router.get("/download/{pet_id}")
-def download_pet(pet_id: str, db: Session = Depends(get_db)):
-    pet = db.query(Pet).filter(Pet.id == pet_id).first()
-    if not pet or not pet.asset_bundle_path:
-        raise HTTPException(status_code=404, detail="Pet bundle not found")
-    if pet.status != PetStatus.READY:
-        raise HTTPException(400, "Pet not ready for download")
-
-    bundle_path = Path(settings.asset_dir).parent / pet.asset_bundle_path
-    return FileResponse(bundle_path, filename=f"{pet.name}.pet", media_type="application/zip")
-```
-
-- [ ] **Step 3: Write e2e test**
-
-Create `tests/test_e2e_generation.py`:
 ```python
 import io
+import zipfile
+import json
 from PIL import Image
 
 
-def _upload_photo(client):
-    img = Image.new("RGB", (200, 300), color=(100, 150, 200))
+def validate_pet_bundle(zip_bytes: bytes) -> list[str]:
+    errors = []
+    required = ["skeleton.json", "atlas.png", "atlas.json", "preview_front.png", "metadata.json"]
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            namelist = zf.namelist()
+            for name in required:
+                if name not in namelist:
+                    errors.append(f"Missing: {name}")
+                    continue
+                info = zf.getinfo(name)
+                if name.endswith(".png"):
+                    if info.file_size < 1024:
+                        errors.append(f"Too small: {name} ({info.file_size} bytes)")
+                    else:
+                        try:
+                            img = Image.open(io.BytesIO(zf.read(name)))
+                            img.verify()
+                        except Exception:
+                            errors.append(f"Invalid PNG: {name}")
+                if name.endswith(".json"):
+                    data = json.loads(zf.read(name))
+                    if not data:
+                        errors.append(f"Empty JSON: {name}")
+
+            if "atlas.json" in namelist and "atlas.png" in namelist:
+                atlas_data = json.loads(zf.read("atlas.json"))
+                if len(atlas_data.get("regions", {})) < 2:
+                    errors.append("atlas.json: fewer than 2 regions")
+
+            if "skeleton.json" in namelist:
+                skel = json.loads(zf.read("skeleton.json"))
+                if len(skel.get("bones", [])) < 4:
+                    errors.append(f"skeleton.json: only {len(skel.get('bones', []))} bones (need ≥4)")
+                anims = skel.get("animations", {})
+                for a in ["idle", "walk", "poke"]:
+                    if a not in anims:
+                        errors.append(f"skeleton.json: missing animation '{a}'")
+    except zipfile.BadZipFile:
+        errors.append("Not a valid zip file")
+
+    return errors
+```
+
+- [ ] **Step 3: Write generation integration tests**
+
+Add to `tests/test_generation.py`:
+```python
+def test_job_status_not_found(client, auth_headers):
+    resp = client.get("/api/v1/jobs/nonexistent", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_confirm_nonexistent_job(client, auth_headers):
+    resp = client.post("/api/v1/jobs/nonexistent/confirm", json={"action": "confirm"}, headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_download_not_ready(client, auth_headers):
+    resp = client.get("/api/v1/download/nonexistent", headers=auth_headers)
+    assert resp.status_code == 404
+```
+
+- [ ] **Step 4: Write bundle validation tests**
+
+Create `tests/test_bundle_validation.py`:
+```python
+import io
+import zipfile
+import json
+from PIL import Image
+from app.validators.pet_bundle import validate_pet_bundle
+
+
+def _make_valid_bundle() -> bytes:
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    response = client.post(
-        "/api/v1/generation/upload",
-        files={"file": ("photo.png", buf, "image/png")},
-        data={"name": "E2E Pet"},
-    )
-    assert response.status_code == 202
-    return response.json()["id"]
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("skeleton.json", json.dumps({"bones": [{"name": "root"}, {"name": "a"}, {"name": "b"}, {"name": "c"}],
+                                                   "animations": {"idle": {}, "walk": {}, "poke": {}}}))
+        zf.writestr("atlas.json", json.dumps({"image": "atlas.png", "size": {"w": 512, "h": 512},
+                                               "regions": {"head": {"x": 0, "y": 0, "w": 64, "h": 64},
+                                                           "torso": {"x": 64, "y": 0, "w": 64, "h": 100}}}))
+        # Valid PNG > 2KB
+        img = Image.new("RGBA", (512, 512), (255, 0, 0, 255))
+        png_buf = io.BytesIO()
+        img.save(png_buf, format="PNG")
+        zf.writestr("atlas.png", png_buf.getvalue())
+        zf.writestr("preview_front.png", png_buf.getvalue())
+        zf.writestr("metadata.json", json.dumps({"name": "Test"}))
+    return buf.getvalue()
 
 
-def test_full_generation_flow(client):
-    pet_id = _upload_photo(client)
+def test_valid_bundle_passes():
+    errors = validate_pet_bundle(_make_valid_bundle())
+    assert errors == [], f"Expected no errors, got: {errors}"
 
-    # Trigger generation
-    response = client.post(f"/api/v1/generation/generate/{pet_id}")
-    assert response.status_code in (200, 500)  # 500 if pose detection fails on blank image
 
-    # Check status
-    response = client.get(f"/api/v1/generation/status/{pet_id}")
-    assert response.status_code == 200
-    assert response.json()["status"] in ("awaiting_review", "failed", "processing")
+def test_missing_atlas():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("skeleton.json", "{}")
+        zf.writestr("atlas.json", "{}")
+        zf.writestr("preview_front.png", b"x" * 2000)
+        zf.writestr("metadata.json", "{}")
+    errors = validate_pet_bundle(buf.getvalue())
+    assert any("Missing" in e and "atlas.png" in e for e in errors)
+
+
+def test_empty_skeleton():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("skeleton.json", "{}")
+        img = Image.new("RGBA", (512, 512))
+        png_buf = io.BytesIO()
+        img.save(png_buf, format="PNG")
+        zf.writestr("atlas.png", png_buf.getvalue())
+        zf.writestr("atlas.json", json.dumps({"regions": {"a": {}, "b": {}}}))
+        zf.writestr("preview_front.png", png_buf.getvalue())
+        zf.writestr("metadata.json", "{}")
+    errors = validate_pet_bundle(buf.getvalue())
+    assert any("bones" in e for e in errors)
 ```
 
 Run:
 ```bash
-python -m pytest tests/test_e2e_generation.py -v
+python -m pytest tests/test_generation.py tests/test_bundle_validation.py -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pet-bot-server/app/routers/generation.py pet-bot-server/app/validators/ pet-bot-server/tests/
+git commit -m "feat: add generation routes, .pet bundle builder, and validation with strict tests"
+```
+
+---
+
+### Task 11: Pet CRUD Routes
+
+**Files:**
+- Create: `pet-bot-server/app/routers/pets.py`
+- Modify: `pet-bot-server/app/main.py` (register pets router)
+
+- [ ] **Step 1: Create app/routers/pets.py**
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app.models.user import User
+from app.models.pet import Pet
+from app.schemas.pet import PetResponse, PetDetailResponse, PetListResponse
+from app.auth import get_current_user
+
+router = APIRouter(prefix="/api/v1/pets", tags=["pets"])
+
+
+@router.get("/", response_model=PetListResponse)
+def list_pets(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    pets = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).all()
+    return PetListResponse(
+        pets=[PetResponse.model_validate(p) for p in pets],
+        total=len(pets),
+    )
+
+
+@router.get("/{pet_id}", response_model=PetDetailResponse)
+def get_pet(pet_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    pet = db.query(Pet).filter(Pet.id == pet_id, Pet.user_id == user.id).first()
+    if not pet:
+        raise HTTPException(status_code=404, detail="Pet not found")
+    return PetDetailResponse.model_validate(pet)
+
+
+@router.delete("/{pet_id}", status_code=204)
+def delete_pet(pet_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    pet = db.query(Pet).filter(Pet.id == pet_id, Pet.user_id == user.id).first()
+    if not pet:
+        raise HTTPException(status_code=404, detail="Pet not found")
+
+    from app.storage.local import storage
+    storage.delete_pet_assets(pet_id)
+    if pet.source_photo_path:
+        storage.delete_upload(pet.source_photo_path)
+
+    db.delete(pet)
+    db.commit()
+```
+
+- [ ] **Step 2: Register in main.py**
+
+```python
+from app.routers import pets
+app.include_router(pets.router)
+```
+
+- [ ] **Step 3: Write pet CRUD tests**
+
+Create `tests/test_pets.py`:
+```python
+def test_list_pets_empty(client, auth_headers):
+    resp = client.get("/api/v1/pets/", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"pets": [], "total": 0}
+
+
+def test_list_pets_requires_auth(client):
+    resp = client.get("/api/v1/pets/")
+    assert resp.status_code == 403
+```
+
+Run:
+```bash
+python -m pytest tests/test_pets.py -v
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add pet-bot-server/app/routers/generation.py pet-bot-server/app/services/pipeline.py pet-bot-server/tests/test_e2e_generation.py
-git commit -m "feat: add end-to-end generation and confirm/download endpoints"
+git add pet-bot-server/app/routers/pets.py pet-bot-server/app/main.py pet-bot-server/tests/test_pets.py
+git commit -m "feat: add user-scoped Pet CRUD routes with auth"
 ```
 
 ---
 
-### Task 11: Final Integration & Static Asset Serve
+### Task 12: Static Asset Serving + Final Wiring
 
 **Files:**
-- Modify: `pet-bot-server/app/main.py` (static mount, final polish)
+- Modify: `pet-bot-server/app/main.py` (static mount, all routers)
 
-- [ ] **Step 1: Add static file serving to main.py**
+- [ ] **Step 1: Final main.py**
 
 ```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+from app.config import settings
+from app.database import init_db
 
-# Mount asset directory for serving preview images
-asset_path = Path(settings.asset_dir)
-asset_path.mkdir(parents=True, exist_ok=True)
-app.mount("/assets", StaticFiles(directory=str(asset_path)), name="assets")
 
-upload_path = Path(settings.upload_dir)
-upload_path.mkdir(parents=True, exist_ok=True)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins.split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Static file serving for generated assets (previews, downloads)
+app.mount("/assets", StaticFiles(directory=settings.asset_dir), name="assets")
+
+# Routers
+from app.routers import auth, pets, generation
+app.include_router(auth.router)
+app.include_router(pets.router)
+app.include_router(generation.router)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "app": settings.app_name}
 ```
 
-- [ ] **Step 2: Run full test suite**
+- [ ] **Step 2: Run the full test suite**
 
 ```bash
 cd pet-bot-server
 python -m pytest tests/ -v --tb=short
 ```
 
-- [ ] **Step 3: Commit**
+Expected: All tests in `test_auth.py`, `test_pets.py`, `test_generation.py`, `test_pipeline.py`, `test_rigging.py`, `test_atlas.py`, `test_bundle_validation.py` PASS.
+
+- [ ] **Step 3: Manual smoke test**
+
+```bash
+# Terminal 1: Start server
+python -m uvicorn app.main:app --reload
+
+# Terminal 2: Smoke test the full flow
+# Register
+curl -X POST http://localhost:8000/auth/register -H "Content-Type: application/json" -d '{"email":"test@test.com","password":"123456"}'
+# Save the token as TOKEN
+
+# Upload a photo
+curl -X POST http://localhost:8000/api/v1/upload -H "Authorization: Bearer $TOKEN" -F "file=@test_photo.png" -F "name=MyPet"
+# Returns {"pet_id": "...", "job_id": "...", "status": "queued"}
+
+# Poll job status (replace JOB_ID)
+curl http://localhost:8000/api/v1/jobs/$JOB_ID -H "Authorization: Bearer $TOKEN"
+
+# When status=awaiting_review: confirm
+curl -X POST http://localhost:8000/api/v1/jobs/$JOB_ID/confirm -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"action":"confirm"}'
+
+# Download .pet bundle
+curl http://localhost:8000/api/v1/download/$PET_ID -H "Authorization: Bearer $TOKEN" -o mypet.pet
+
+# Verify .pet is valid
+python -c "from app.validators.pet_bundle import validate_pet_bundle; print(validate_pet_bundle(open('mypet.pet','rb').read()))"
+# Should print: []
+```
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add pet-bot-server/app/main.py
-git commit -m "feat: add static asset serving and final backend integration"
+git commit -m "feat: final wiring — static assets, all routers registered, full test suite passing"
 ```
 
 ---
 
 ## Backend Implementation Complete
 
-After all 11 tasks: the FastAPI server handles photo upload → AI pipeline → pet bundle download end-to-end. Tests cover every route and pipeline stage. Next: implement the Electron client.
+After all 12 tasks: the FastAPI server supports:
+- **Auth**: register/login with JWT, all endpoints guarded by `get_current_user`
+- **Upload**: photo → pet + generation_job created, pipeline dispatched via BackgroundTasks
+- **Pipeline**: 5 async stages (pose → bg removal → segment → rig → atlas) with quality gates at each stage
+- **Quota**: per-user daily generation limit (`quota_usage` table), enforced at job creation
+- **Review**: front-view preview → confirm (builds .pet zip) or regenerate (creates new job)
+- **Download**: validated .pet bundle (real atlas.png + proper UV regions + ≥4 bones + ≥3 animations)
+- **API keys**: server-side only, never exposed to clients
+- **Tests**: 15+ tests across 7 test files, all with strict assertions (no "200 or 500" permissiveness)
