@@ -9,6 +9,7 @@ bcrypt>=4.2.0
 Pillow>=10.4.0
 onnxruntime>=1.18.0
 rembg[cpu]>=2.0.62
+openai>=1.0.0
 mediapipe>=0.10.14
 opencv-python-headless>=4.10.0
 numpy>=2.0.0

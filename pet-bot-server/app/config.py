@@ -8,8 +8,10 @@ class Settings(BaseSettings):
     upload_dir: str = "./uploads"
     asset_dir: str = "./assets"
     builtin_provider_key: str = ""
-    max_free_generations: int = 5  # deprecated — 积分系统替代
-    credit_cost_per_generation: int = 10  # 每次生成消耗积分
+    builtin_model: str = "gpt-image-2"
+    builtin_api_base: str = "https://api.openai.com/v1"
+    max_free_generations: int = 5
+    credit_cost_per_generation: int = 10
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
