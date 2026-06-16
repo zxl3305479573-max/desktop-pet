@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { UploadZone } from '../components/UploadZone'
 import { StageViewer } from '../components/StageViewer'
 import { useGeneration } from '../hooks/useGeneration'
@@ -10,17 +10,46 @@ export default function Create() {
   const [file, setFile] = useState<File | null>(null)
   const [name, setName] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [dragOver, setDragOver] = useState(false)
   const { selectedProvider, setSelectedProvider, credits, setCredits, costPerGen, setCostPerGen, customApiKey } = useStore()
 
   useEffect(() => {
     api.getCredits().then(d => { setCredits(d.balance); setCostPerGen(d.cost_per_generation) }).catch(() => {})
   }, [])
 
-  const handleUpload = (f: File, n: string) => {
+  const onFileDrop = useCallback((f: File) => {
+    const n = f.name.split('.')[0] || '伴侣'
     setFile(f); setName(n)
     upload(f, n, prompt, selectedProvider)
     setTimeout(() => { api.getCredits().then(d => setCredits(d.balance)).catch(() => {}) }, 1000)
-  }
+  }, [prompt, selectedProvider, upload])
+
+  // Global drag-and-drop: capture drops anywhere on the page
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => { e.preventDefault(); setDragOver(true) }
+    const onDragLeave = (e: DragEvent) => {
+      e.preventDefault()
+      if (e.relatedTarget === null) setDragOver(false)
+    }
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault()
+      setDragOver(false)
+      const f = e.dataTransfer?.files?.[0]
+      if (f && f.type.startsWith('image/') && stage === 'idle' && canGenerate) {
+        onFileDrop(f)
+      }
+    }
+    document.addEventListener('dragover', onDragOver)
+    document.addEventListener('dragleave', onDragLeave)
+    document.addEventListener('drop', onDrop)
+    return () => {
+      document.removeEventListener('dragover', onDragOver)
+      document.removeEventListener('dragleave', onDragLeave)
+      document.removeEventListener('drop', onDrop)
+    }
+  }, [stage, canGenerate, onFileDrop])
+
+  const handleUpload = (f: File, n: string) => onFileDrop(f)
 
   const providers = [
     { value: 'builtin', label: `内置 AI (${costPerGen} 积分/次)` },
@@ -41,7 +70,19 @@ export default function Create() {
   }
 
   return (
-    <div>
+    <div className="relative">
+      {/* Drag overlay */}
+      {dragOver && stage === 'idle' && (
+        <div className="fixed inset-0 z-50 bg-indigo-900/80 flex items-center justify-center pointer-events-none"
+          style={{ margin: 0 }}>
+          <div className="text-center">
+            <p className="text-6xl mb-4">📥</p>
+            <p className="text-2xl font-bold text-white">松开以拖入图片</p>
+            <p className="text-indigo-300 mt-2">支持 PNG、JPG、WebP</p>
+          </div>
+        </div>
+      )}
+
       <h2 className="text-2xl font-bold mb-4">创建新伴侣</h2>
 
       {/* Credit bar */}

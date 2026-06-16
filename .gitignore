@@ -4,6 +4,7 @@ dist/
 dist-electron/
 dist-renderer/
 .env
+pet-bot-server/.env
 __pycache__/
 *.pyc
 pet-bot-server/test.db
