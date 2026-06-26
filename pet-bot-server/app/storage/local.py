@@ -9,14 +9,15 @@ class LocalStorage:
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
         dest.write_bytes(file_bytes)
-        return str(dest)
+        return str(dest).replace("\\", "/")
 
     def save_asset(self, file_bytes: bytes, pet_id: str, name: str) -> str:
         asset_dir = Path(settings.asset_dir) / pet_id
         asset_dir.mkdir(parents=True, exist_ok=True)
         dest = asset_dir / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(file_bytes)
-        return str(dest)
+        return str(dest).replace("\\", "/")
 
     def read(self, path_str: str) -> bytes:
         return Path(path_str).read_bytes()

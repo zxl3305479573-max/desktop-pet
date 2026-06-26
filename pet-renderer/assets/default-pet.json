@@ -15,5 +15,5 @@
     { "name": "right_lower_leg", "parent": "root", "x": 130, "y": 115, "length": 30, "rotation": -0.1 }
   ],
   "slots": [],
-  "animations": { "idle": {}, "walk": {}, "jump": {}, "sit": {}, "sleep": {}, "poke": {}, "spin": {}, "wave": {} }
+  "animations": { "idle": {}, "jump": {}, "sit": {}, "sleep": {}, "poke": {}, "petting": {}, "spin": {}, "wave": {} }
 }

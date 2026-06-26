@@ -19,6 +19,12 @@ function getDb(): Database.Database {
         created_at TEXT DEFAULT (datetime('now'))
       )
     `)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `)
   }
   return db
 }
@@ -32,6 +38,20 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.on('pet:close', (_event, petId: string) => closePetWindow(petId))
+
+  ipcMain.on('pet:closeCurrent', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+
+    for (const [petId, petWindow] of activePetWindows) {
+      if (petWindow === win) {
+        activePetWindows.delete(petId)
+        break
+      }
+    }
+
+    if (!win.isDestroyed()) win.close()
+  })
 
   ipcMain.on('pet:closeAll', () => closeAllPetWindows())
 
@@ -54,7 +74,9 @@ export function registerIpcHandlers() {
   ipcMain.handle('pet:loadBundle', async (_event, petId: string) => {
     const database = getDb()
     const row = database.prepare('SELECT bundle FROM local_pets WHERE id = ?').get(petId) as any
-    return row ? row.bundle.buffer : null
+    if (!row) return null
+    const bundle = row.bundle as Buffer
+    return bundle.buffer.slice(bundle.byteOffset, bundle.byteOffset + bundle.byteLength)
   })
 
   ipcMain.handle('pet:listLocal', async () => {
@@ -77,6 +99,34 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.on('window:minimizeToTray', () => {})
+
+  // ---- settings persistence ----
+
+  ipcMain.handle('settings:save', async (_event, data: Record<string, string>) => {
+    const database = getDb()
+    const stmt = database.prepare(
+      'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)'
+    )
+    const insertMany = database.transaction((entries: [string, string][]) => {
+      for (const [key, value] of entries) {
+        stmt.run(key, value)
+      }
+    })
+    insertMany(Object.entries(data))
+  })
+
+  ipcMain.handle('settings:loadAll', async () => {
+    const database = getDb()
+    const rows = database.prepare('SELECT key, value FROM settings').all() as {
+      key: string
+      value: string
+    }[]
+    const result: Record<string, string> = {}
+    for (const row of rows) {
+      result[row.key] = row.value
+    }
+    return result
+  })
 }
 
 export function closeDb() {

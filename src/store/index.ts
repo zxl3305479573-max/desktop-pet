@@ -1,36 +1,37 @@
 import { create } from 'zustand'
 
 interface AppState {
-  token: string | null
   backendUrl: string
-  customApiKey: string
+  apiKey: string
+  apiBaseUrl: string
+  apiModel: string
   selectedProvider: string
-  credits: number
-  costPerGen: number
-  role: string
 
-  setToken: (token: string | null) => void
   setBackendUrl: (url: string) => void
-  setCustomApiKey: (key: string) => void
+  setApiKey: (key: string) => void
+  setApiBaseUrl: (url: string) => void
+  setApiModel: (model: string) => void
   setSelectedProvider: (p: string) => void
-  setCredits: (c: number) => void
-  setCostPerGen: (c: number) => void
+  loadSettings: (settings: Record<string, string>) => void
 }
 
 export const useStore = create<AppState>((set) => ({
-  token: null,
-  backendUrl: 'http://localhost:8000',
-  customApiKey: '',
+  backendUrl: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
+  apiKey: '',
+  apiBaseUrl: 'https://api.openai.com/v1',
+  apiModel: 'gpt-image-2',
   selectedProvider: 'builtin',
-  credits: 0,
-  costPerGen: 10,
-  role: 'user',
 
-  setToken: (token) => set({ token }),
   setBackendUrl: (url) => set({ backendUrl: url }),
-  setCustomApiKey: (key) => set({ customApiKey: key }),
+  setApiKey: (key) => set({ apiKey: key }),
+  setApiBaseUrl: (url) => set({ apiBaseUrl: url }),
+  setApiModel: (model) => set({ apiModel: model }),
   setSelectedProvider: (p) => set({ selectedProvider: p }),
-  setCredits: (c) => set({ credits: c }),
-  setCostPerGen: (c) => set({ costPerGen: c }),
-  setRole: (r: string) => set({ role: r }),
+
+  loadSettings: (settings) =>
+    set({
+      apiKey: settings.apiKey ?? '',
+      apiBaseUrl: settings.apiBaseUrl ?? 'https://api.openai.com/v1',
+      apiModel: settings.apiModel ?? 'gpt-image-2',
+    }),
 }))

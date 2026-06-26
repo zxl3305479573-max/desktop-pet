@@ -10,6 +10,7 @@ export function setupDragHandlers(canvas: HTMLCanvasElement, handler: DragHandle
   let lastY = 0
 
   canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return
     dragging = true
     lastX = e.screenX
     lastY = e.screenY

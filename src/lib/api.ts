@@ -5,11 +5,16 @@ function getBaseUrl(): string {
   return useStore.getState().backendUrl || 'http://localhost:8000'
 }
 
-function headers(): Record<string, string> {
-  const token = useStore.getState().token
-  const h: Record<string, string> = {}
-  if (token) h['Authorization'] = `Bearer ${token}`
-  return h
+/**
+ * Convert a server-side asset path (e.g. "./assets/abc/preview_front.png")
+ * to a full URL the browser can load.
+ */
+export function resolveAssetUrl(path: string | null): string {
+  if (!path) return ''
+  const base = getBaseUrl()
+  // The backend stores paths like "./assets/..." or "assets/..."
+  const relative = path.replace(/^\.[\\/]/, '')
+  return `${base}/${relative}`
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -17,7 +22,6 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      ...headers(),
       ...(options?.body instanceof FormData ? {} : options?.headers),
     },
   })
@@ -35,7 +39,7 @@ export const api = {
   getPet: (id: string) => request<PetDetail>(`/api/v1/pets/${id}`),
 
   deletePet: (id: string) =>
-    fetch(`${getBaseUrl()}/api/v1/pets/${id}`, { method: 'DELETE', headers: headers() }),
+    fetch(`${getBaseUrl()}/api/v1/pets/${id}`, { method: 'DELETE' }),
 
   uploadPhoto: async (file: File, name: string, prompt?: string, provider?: string) => {
     const form = new FormData()
@@ -45,7 +49,6 @@ export const api = {
     if (provider) form.append('provider', provider)
     const res = await fetch(`${getBaseUrl()}/api/v1/upload`, {
       method: 'POST',
-      headers: { ...headers() },
       body: form,
     })
     if (!res.ok) {
@@ -60,6 +63,12 @@ export const api = {
   runNextStage: (jobId: string) =>
     request<any>(`/api/v1/jobs/${jobId}/next`, { method: 'POST' }),
 
+  regenerateStage: (jobId: string, stage: number) =>
+    request<any>(`/api/v1/jobs/${jobId}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify({ stage }),
+    }),
+
   confirmGeneration: (jobId: string, action: 'confirm' | 'regenerate') =>
     request<{ status: string; pet_id?: string; job_id?: string }>(
       `/api/v1/jobs/${jobId}/confirm`,
@@ -67,30 +76,11 @@ export const api = {
     ),
 
   downloadPet: async (petId: string) => {
-    const res = await fetch(`${getBaseUrl()}/api/v1/download/${petId}`, { headers: headers() })
+    const res = await fetch(`${getBaseUrl()}/api/v1/download/${petId}`)
     if (!res.ok) throw new Error('Download failed')
     return res.arrayBuffer()
   },
 
-  getCredits: () =>
-    request<{ balance: number; cost_per_generation: number; transactions: any[] }>('/api/v1/credits/me'),
-
-  rechargeCredits: (amount: number) =>
-    request<{ balance: number; recharged: number }>('/api/v1/credits/recharge', {
-      method: 'POST',
-      body: JSON.stringify({ amount }),
-    }),
-
-  // Admin
-  adminListUsers: () =>
-    request<{ users: Array<{ id: string; email: string; credits: number; role: string; created_at: string }> }>('/api/v1/credits/admin/users'),
-
-  adminPromote: (email: string) =>
-    request<any>(`/api/v1/credits/admin/promote/${encodeURIComponent(email)}`, { method: 'POST' }),
-
-  adminAdjustCredits: (email: string, amount: number) =>
-    request<any>('/api/v1/credits/admin/adjust-credits', {
-      method: 'POST',
-      body: JSON.stringify({ email, amount }),
-    }),
+  updateConfig: (config: { api_key?: string; api_base_url?: string; model?: string }) =>
+    request('/api/v1/config', { method: 'PUT', body: JSON.stringify(config) }),
 }

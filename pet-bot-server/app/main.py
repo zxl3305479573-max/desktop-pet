@@ -22,7 +22,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static file serving for generated assets
 app.mount("/assets", StaticFiles(directory=settings.asset_dir), name="assets")
 
 
@@ -32,8 +31,7 @@ def health():
 
 
 # Routers
-from app.routers import auth, pets, generation, credits
-app.include_router(auth.router)
+from app.routers import pets, generation, config
 app.include_router(pets.router)
 app.include_router(generation.router)
-app.include_router(credits.router)
+app.include_router(config.router)

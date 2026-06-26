@@ -1,34 +1,185 @@
-"""
-内置 Provider — 基于 gpt-image-2 API。
-本地处理：模板姿态识别 + rembg 抠图。
-核心生成能力通过调用 OpenAI 兼容 API 实现。
-"""
+"""Built-in provider based on an OpenAI-compatible image API."""
+import base64
 import io
 import json
 import logging
-import base64
+import re
+import urllib.request
+
 import numpy as np
-from PIL import Image
 from openai import OpenAI
-from rembg import remove
-from app.providers.base import AIProvider, PoseResult, SegmentationResult, RiggingResult, AtlasResult
-from app.services.rigging import build_skeleton
-from app.services.atlas import build_atlas
+from PIL import Image
+
 from app.config import settings
+from app.providers.base import AIProvider
 
 logger = logging.getLogger(__name__)
 
-MIN_KEYPOINTS = 8
-MIN_CONFIDENCE = 0.5
+
+def normalize_openai_base_url(base_url: str) -> str:
+    base = (base_url or "https://api.openai.com/v1").strip().rstrip("/")
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    return base
+
+
+def extract_image_bytes(response) -> bytes:
+    """Extract image bytes from common OpenAI-compatible image responses."""
+    image = _find_image_value(response)
+    if image is None:
+        logger.warning("AI image response contained no image data: %s", _summarize_response(response))
+        if response == "":
+            raise ValueError(
+                "API 返回空内容。请确认 BUILTIN_API_BASE 使用 OpenAI 兼容的 /v1 地址，"
+                "并确认当前 API Key 拥有可用的图片生成模型通道。"
+            )
+        raise ValueError(
+            f"No image data found in API response. Response type: {type(response)}, "
+            f"preview: {_summarize_response(response)}"
+        )
+    return _image_value_to_bytes(image)
+
+
+def _find_image_value(value):
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        embedded = _extract_embedded_image_string(stripped)
+        if embedded is not None:
+            return embedded
+        if _looks_like_image_string(stripped):
+            return stripped
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return _find_image_value(json.loads(stripped))
+            except json.JSONDecodeError:
+                return None
+        return None
+    if isinstance(value, dict):
+        for key in ("b64_json", "image"):
+            direct = value.get(key)
+            if direct:
+                return direct
+        found = _find_image_value(value.get("url"))
+        if found is not None:
+            return found
+        image_url = value.get("image_url")
+        if isinstance(image_url, dict):
+            found = _find_image_value(image_url.get("url"))
+            if found is not None:
+                return found
+        for key in ("data", "content", "choices", "message", "output"):
+            found = _find_image_value(value.get(key))
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _find_image_value(item)
+            if found is not None:
+                return found
+        return None
+    if hasattr(value, "model_dump"):
+        try:
+            found = _find_image_value(value.model_dump())
+            if found is not None:
+                return found
+        except Exception:
+            pass
+    for attr in ("b64_json", "image", "url", "data", "content", "choices", "message", "output"):
+        if hasattr(value, attr):
+            found = _find_image_value(getattr(value, attr))
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_embedded_image_string(value: str) -> str | None:
+    data_url = re.search(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+", value)
+    if data_url:
+        return data_url.group(0)
+
+    url = re.search(r"https?://\S+", value)
+    if url:
+        return url.group(0).rstrip(").,]\"'")
+
+    json_match = re.search(r"(\{.*\}|\[.*\])", value, flags=re.DOTALL)
+    if json_match:
+        try:
+            found = _find_image_value(json.loads(json_match.group(1)))
+            if found is not None:
+                return found
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _looks_like_image_string(value: str) -> bool:
+    if value.startswith("data:image"):
+        return True
+    if value.startswith("http://") or value.startswith("https://"):
+        return True
+    if len(value) > 100 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", value):
+        return True
+    return False
+
+
+def _summarize_response(response) -> str:
+    text = repr(response)
+    text = re.sub(
+        r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+",
+        "data:image/...;base64,[omitted]",
+        text,
+    )
+    if len(text) > 500:
+        text = text[:500] + "...[truncated]"
+    return text
+
+
+def _image_value_to_bytes(value) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"Unsupported image value type: {type(value)}")
+    value = value.strip()
+    if value.startswith("data:image"):
+        _, b64_data = value.split(",", 1)
+        return base64.b64decode(b64_data)
+    if value.startswith("http://") or value.startswith("https://"):
+        with urllib.request.urlopen(value, timeout=60) as res:
+            return res.read()
+    return base64.b64decode(value)
+
+
+def _to_actionable_generation_error(error: Exception, model: str) -> ValueError:
+    text = str(error)
+    if "model_not_found" in text or "No available channel" in text:
+        return ValueError(
+            f"当前 API Key 没有可用的图片生成模型通道：{model}。"
+            "请在服务商后台开通图片模型，或把 BUILTIN_MODEL 改成该 Key 可用的图片生成模型。"
+        )
+    return ValueError(f"AI 图片接口调用失败：{text}")
 
 
 class BuiltinProvider(AIProvider):
     name = "builtin"
 
     def __init__(self, api_key: str = ""):
-        self._api_key = api_key or settings.builtin_provider_key
-        self._model = settings.builtin_model
-        self._base_url = settings.builtin_api_base
+        from app.config import runtime_config
+
+        # Runtime config takes precedence, then explicit arg, then .env default
+        rt_api_key = runtime_config.api_key
+        rt_base_url = runtime_config.api_base_url
+        rt_model = runtime_config.model
+
+        self._api_key = api_key or rt_api_key or settings.builtin_provider_key
+        resolved_base = rt_base_url or settings.builtin_api_base
+        self._model = rt_model or settings.builtin_model
+        self._base_url = normalize_openai_base_url(resolved_base)
         self._client = None
 
     @property
@@ -44,135 +195,200 @@ class BuiltinProvider(AIProvider):
     def model(self) -> str:
         return self._model
 
-    # ── Stage 1: Pose Estimation (template-based fallback) ──
-    def estimate_pose(self, image_bytes: bytes) -> PoseResult:
-        """Estimate pose using simple image-based heuristics.
-        Generates approximate keypoints by dividing the image into body regions."""
-        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        w, h = pil_img.size
-        np_img = np.array(pil_img)
+    def generate_image(
+        self,
+        prompt: str,
+        photo_bytes: bytes | None = None,
+        context_images: list[bytes] | None = None,
+    ) -> bytes:
+        """Generate one image, optionally using reference images."""
+        if photo_bytes or context_images:
+            image_inputs = []
+            for index, raw in enumerate([photo_bytes, *(context_images or [])]):
+                if not raw:
+                    continue
+                image = io.BytesIO(raw)
+                image.name = f"reference-{index}.png"
+                image_inputs.append(image)
 
-        # Generate approximate humanoid keypoints based on image proportions
-        cx, cy = w / 2, h * 0.3
-        shoulder_y = h * 0.35
-        hip_y = h * 0.65
-        knee_y = h * 0.8
-        ankle_y = h * 0.95
+            try:
+                response = self.client.images.edit(
+                    model=self.model,
+                    image=image_inputs,
+                    prompt=prompt,
+                    size="1024x1024",
+                    response_format="b64_json",
+                )
+            except Exception as error:
+                raise _to_actionable_generation_error(error, self.model) from error
+            return extract_image_bytes(response)
 
-        template = [
-            ("joint_0",  cx, cy - 10, 0.9),     # nose
-            ("joint_11", cx - 40, shoulder_y, 0.85),   # L shoulder
-            ("joint_12", cx + 40, shoulder_y, 0.85),   # R shoulder
-            ("joint_13", cx - 60, h * 0.48, 0.8),      # L elbow
-            ("joint_14", cx + 60, h * 0.48, 0.8),      # R elbow
-            ("joint_15", cx - 50, h * 0.58, 0.75),     # L wrist
-            ("joint_16", cx + 50, h * 0.58, 0.75),     # R wrist
-            ("joint_23", cx - 30, hip_y, 0.85),        # L hip
-            ("joint_24", cx + 30, hip_y, 0.85),        # R hip
-            ("joint_25", cx - 30, knee_y, 0.8),        # L knee
-            ("joint_26", cx + 30, knee_y, 0.8),        # R knee
-            ("joint_27", cx - 25, ankle_y, 0.75),      # L ankle
-            ("joint_28", cx + 25, ankle_y, 0.75),      # R ankle
-        ]
+        try:
+            response = self.client.images.generate(
+                model=self.model,
+                prompt=prompt,
+                size="1024x1024",
+                response_format="b64_json",
+            )
+        except Exception as error:
+            raise _to_actionable_generation_error(error, self.model) from error
+        return extract_image_bytes(response)
 
-        keypoints = [{"x": x, "y": y, "visibility": v, "name": n} for n, x, y, v in template]
-        avg_conf = sum(k["visibility"] for k in keypoints) / len(keypoints)
-        passed = True  # Template always passes
-
-        return PoseResult(keypoints=keypoints, image_width=w, image_height=h,
-                          confidence=avg_conf, passed=passed)
-
-    # ── Stage 2: Background Removal (local rembg) ──
-    def remove_background(self, image_bytes: bytes) -> bytes:
-        return remove(image_bytes)
-
-    # ── Stage 3: Part Segmentation (local, keypoint-based) ──
-    def segment_parts(self, image_bytes: bytes, pose: PoseResult) -> SegmentationResult:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-        np_img = np.array(img)
-        h, w = np_img.shape[:2]
-        parts = {}
-
-        # Head
-        nose_kps = [k for k in pose.keypoints if k["name"] in ("joint_0",)]
-        if nose_kps:
-            nx, ny = nose_kps[0]["x"], nose_kps[0]["y"]
-            r = 60
-            x1, y1 = max(0, int(nx - r)), max(0, int(ny - r * 1.5))
-            x2, y2 = min(w, int(nx + r)), min(h, int(ny + r * 0.5))
-            if x2 > x1 and y2 > y1:
-                parts["head"] = np_img[y1:y2, x1:x2].copy()
-
-        # Torso
-        torso_names = ["joint_11", "joint_12", "joint_23", "joint_24"]
-        torso_kps = [k for k in pose.keypoints if k["name"] in torso_names]
-        if torso_kps:
-            xs, ys = [k["x"] for k in torso_kps], [k["y"] for k in torso_kps]
-            x1, y1 = max(0, int(min(xs)) - 20), max(0, int(min(ys)) - 10)
-            x2, y2 = min(w, int(max(xs)) + 20), min(h, int(max(ys)) + 10)
-            if x2 > x1 and y2 > y1:
-                parts["torso"] = np_img[y1:y2, x1:x2].copy()
-
-        # Arms & Legs
-        for side, sj, ej in [("left_arm", "joint_11", "joint_13"), ("right_arm", "joint_12", "joint_14")]:
-            sk = next((k for k in pose.keypoints if k["name"] == sj), None)
-            ek = next((k for k in pose.keypoints if k["name"] == ej), None)
-            if sk and ek:
-                px, py = min(sk["x"], ek["x"]) - 10, min(sk["y"], ek["y"]) - 10
-                pw, ph = abs(ek["x"] - sk["x"]) + 40, abs(ek["y"] - sk["y"]) + 40
-                x1, y1 = max(0, int(px)), max(0, int(py))
-                x2, y2 = min(w, int(px + pw)), min(h, int(py + ph))
-                if x2 > x1 and y2 > y1:
-                    parts[side] = np_img[y1:y2, x1:x2].copy()
-
-        for side, hj, kj in [("left_leg", "joint_23", "joint_25"), ("right_leg", "joint_24", "joint_26")]:
-            hk = next((k for k in pose.keypoints if k["name"] == hj), None)
-            kk = next((k for k in pose.keypoints if k["name"] == kj), None)
-            if hk and kk:
-                px, py = min(hk["x"], kk["x"]) - 15, min(hk["y"], kk["y"]) - 10
-                pw, ph = abs(kk["x"] - hk["x"]) + 50, abs(kk["y"] - hk["y"]) + 50
-                x1, y1 = max(0, int(px)), max(0, int(py))
-                x2, y2 = min(w, int(px + pw)), min(h, int(py + ph))
-                if x2 > x1 and y2 > y1:
-                    parts[side] = np_img[y1:y2, x1:x2].copy()
-
-        passed = "head" in parts and "torso" in parts
-        return SegmentationResult(mask=np_img[:, :, 3], parts=parts,
-                                  part_count=len(parts), passed=passed)
-
-    # ── Stage 4: Skeleton Rigging (local) ──
-    def rig_skeleton(self, pose: PoseResult, segmentation: SegmentationResult) -> RiggingResult:
-        skeleton_json = build_skeleton(pose, segmentation)
-        data = json.loads(skeleton_json)
-        bone_count = len(data.get("bones", []))
-        rig_quality = "full" if bone_count >= 8 else "partial" if bone_count >= 4 else "minimal"
-        return RiggingResult(skeleton_json=skeleton_json, bone_count=bone_count, rig_quality=rig_quality)
-
-    # ── Stage 5: Atlas + Preview ──
-    def build_atlas(self, segmentation: SegmentationResult, rigging: RiggingResult) -> AtlasResult:
-        atlas_png, atlas_json_str, preview_front = build_atlas(segmentation, rigging)
-        atlas_data = json.loads(atlas_json_str)
-        region_count = len(atlas_data.get("regions", {}))
-        passed = atlas_png is not None and len(atlas_png) > 200 and region_count >= 2
-        return AtlasResult(atlas_png=atlas_png, atlas_json=atlas_json_str,
-                           preview_front=preview_front, region_count=region_count, passed=passed)
-
-    # ── API: gpt-image-2 图片生成（供未来扩展） ──
-    def generate_image(self, prompt: str, reference_bytes: bytes | None = None) -> bytes:
-        """调用 gpt-image-2 生成图片。"""
-        messages = [{"role": "user", "content": prompt}]
-        if reference_bytes:
-            b64 = base64.b64encode(reference_bytes).decode("utf-8")
-            messages[0]["content"] = [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            ]
-
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=4096,
+    def generate_reference_sheet(self, photo_bytes: bytes) -> bytes:
+        """Generate the reviewed three-view reference sheet."""
+        prompt = (
+            "Create a complete cartoon three-view character design sheet based only on the uploaded subject. "
+            "Show the same character from front view, side view, and back view, full body, aligned on one "
+            "clean spritesheet. Cartoon/anime chibi styling is allowed, but preserve the original hairstyle, "
+            "clothing, colors, silhouette, and recognizable identity from the uploaded image. Do not add animal "
+            "ears, tails, paws, whiskers, fur, horns, wings, robot parts, armor, mechanical body parts, or pet "
+            "features unless they already exist in the uploaded subject. Do not change the species or turn the "
+            "subject into a cat, dog, robot, or mascot. Clean vector lineart, vibrant colors, game asset style, "
+            "isolated on a solid pure white background, no text labels, no scene, no shadows, no cropped body."
         )
-        # Extract image from response (implementation depends on actual API response format)
-        logger.info(f"API call to {self.model} completed")
-        return response
+        return self._generate_with_body_check(prompt, photo_bytes)
+
+    def generate_action_sheets(
+        self,
+        photo_bytes: bytes,
+        context_images: list[bytes] | None = None,
+    ) -> dict[str, bytes]:
+        """Generate reviewed desktop-pet action sheets after the reference sheet is approved."""
+        prompts = {
+            "dragged": (
+                "A held pose collection of 4 different draggable desktop-pet poses for the same approved cartoon "
+                "character. Not an animation sequence. Each frame is a single stable pose that can be held while the "
+                "mouse is dragging the pet: lifted in the air, dangling, mildly panicked, flailing arms and legs. "
+                "Arrange exactly 4 separated full-body poses in one horizontal row of 4 equal-width columns, with "
+                "consistent scale, generous pure white margin around each pose, and no overlap between poses. Do not crop heads, hands, legs, "
+                "feet, hair, or props. Do not include stray body parts from any other pose inside a pose area. "
+                "Sprite sheet, character asset, isolated on a solid pure white background. Match the approved "
+                "reference sheet exactly. Do not add animal ears, tails, paws, robot parts, armor, or mechanical "
+                "body parts unless they already exist in the reference sheet."
+            ),
+            "eating": (
+                "A feeding animation sequence sprite sheet for the same approved cartoon character. Arrange each "
+                "feeding sequence as a row of exactly 4 frames, equal-width, left-to-right, showing one complete feeding action: "
+                "not holding food, lifting a battery shape cookie, biting/chewing, happy satisfied expression. If "
+                "you include multiple variations, put each variation on its own separate row of exactly 4 frames, equal-width. "
+                "Every frame must show one full-body character only, with consistent scale and baseline. Chibi "
+                "character design, game asset, isolated on a solid pure white background. Match the approved "
+                "reference sheet exactly. Do not add animal ears, tails, paws, robot parts, armor, or mechanical body "
+                "parts unless they already exist in the reference sheet."
+            ),
+            "sleep": (
+                "A held pose collection of 4 different sleeping desktop-pet poses for the same approved cartoon "
+                "character. Not an animation sequence. Each frame is a single stable sleeping pose that can be held "
+                "after the pet is untouched for a long time: curled up, lying down, sleepy eyes closed, peaceful rest. "
+                "Arrange exactly 4 separated full-body poses on one sprite sheet with consistent scale, generous "
+                "pure white margin around each pose, and no overlap between poses. Do not crop heads, hands, legs, "
+                "feet, hair, or props. Do not include stray body parts from any other pose inside a pose area. "
+                "Chibi character design, game asset, isolated on a solid pure white background. Match the approved "
+                "reference sheet exactly. Do not add animal ears, tails, paws, robot parts, armor, or mechanical "
+                "body parts unless they already exist in the reference sheet."
+            ),
+            "petting": (
+                "A held pose collection of 4 different petting desktop-pet poses for the same approved cartoon "
+                "character. Not an animation sequence. Each frame is one stable petting reaction that can be shown "
+                "once after a click: gentle head pat, happy reaction with softened eyes, relaxed satisfied smile, "
+                "slightly surprised but pleased expression. Arrange exactly 4 separated full-body poses in one "
+                "horizontal row of 4 equal-width columns, with consistent scale, baseline, generous pure white margin around each pose, and no "
+                "overlap between poses. Do not crop heads, hands, legs, feet, hair, or props. Do not include stray "
+                "body parts from any other pose inside a pose area. Chibi character design, game asset, isolated on "
+                "a solid pure white background. Match the approved reference sheet exactly. Do not add animal ears, "
+                "tails, paws, robot parts, armor, or mechanical body parts unless they already exist in the reference sheet."
+            ),
+        }
+        return {
+            name: self._generate_with_body_check(prompt, photo_bytes, context_images)
+            for name, prompt in prompts.items()
+        }
+
+    def _generate_with_body_check(
+        self,
+        prompt: str,
+        photo_bytes: bytes,
+        context_images: list[bytes] | None = None,
+        max_retries: int = 2,
+    ) -> bytes:
+        """Retry if the generated image appears to be head-only."""
+        result = b""
+        for attempt in range(max_retries + 1):
+            try:
+                result = self.generate_image(prompt, photo_bytes, context_images)
+            except Exception:
+                if attempt < max_retries:
+                    logger.warning("Generation failed on attempt %s, retrying", attempt + 1)
+                    continue
+                raise
+
+            if self._has_full_body(result):
+                return result
+
+            logger.warning(
+                "Body check failed on attempt %s/%s, regenerating with full-body emphasis",
+                attempt + 1,
+                max_retries + 1,
+            )
+            prompt = (
+                "CRITICAL: The character MUST be drawn as a COMPLETE FULL BODY figure. "
+                "Include head, torso, arms, and legs all the way down to the feet. "
+                "Do NOT crop or show only the head/face. "
+            ) + prompt
+
+        return result
+
+    def _has_full_body(self, image_bytes: bytes) -> bool:
+        """Heuristic guard against head-only generations."""
+        try:
+            img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+            arr = np.array(img)
+            is_character = ~(
+                ((arr[:, :, 0] > 240) & (arr[:, :, 1] > 240) & (arr[:, :, 2] > 240)) |
+                (arr[:, :, 3] < 30)
+            )
+
+            rows_with_content = np.any(is_character, axis=1)
+            if not rows_with_content.any():
+                return False
+
+            y_indices = np.where(rows_with_content)[0]
+            content_height = y_indices[-1] - y_indices[0]
+            total_height = arr.shape[0]
+            if total_height == 0:
+                return False
+
+            height_ratio = content_height / total_height
+            content_center_y = (y_indices[0] + y_indices[-1]) / 2
+            center_ratio = content_center_y / total_height
+            has_body = height_ratio > 0.35 and center_ratio > 0.40
+            logger.debug(
+                "Body check: height_ratio=%.2f, center_ratio=%.2f, passed=%s",
+                height_ratio,
+                center_ratio,
+                has_body,
+            )
+            return has_body
+        except Exception as error:
+            logger.warning("Body check failed with error: %s", error)
+            return True
+
+
+def _png_bytes(image: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _split_action_sprite_board(image_bytes: bytes) -> dict[str, bytes]:
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    width, height = image.size
+    mid_x = width // 2
+    mid_y = height // 2
+    crops = {
+        "idle": (0, 0, mid_x, mid_y),
+        "sleep": (mid_x, 0, width, mid_y),
+        "dragged": (0, mid_y, mid_x, height),
+        "eating": (mid_x, mid_y, width, height),
+    }
+    return {name: _png_bytes(image.crop(box)) for name, box in crops.items()}

@@ -2,19 +2,16 @@ import uuid
 import io
 import json as json_mod
 import zipfile
-from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
-from app.models.user import User
 from app.models.pet import Pet, PetStatus
 from app.models.generation_job import GenerationJob, JobStatus
-from app.auth import get_current_user
 from app.storage.local import storage
-from app.schemas.generation import UploadResponse, JobStatusResponse, ConfirmRequest
+from app.schemas.generation import UploadResponse, JobStatusResponse, ConfirmRequest, RegenerateStageRequest
 
 router = APIRouter(prefix="/api/v1", tags=["generation"])
 
@@ -25,8 +22,6 @@ async def upload_photo(
     file: UploadFile = File(...),
     prompt: str = Form(default=""),
     provider: str = Form(default="builtin"),
-    background_tasks: BackgroundTasks = None,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     allowed = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
@@ -37,27 +32,15 @@ async def upload_photo(
     if len(contents) > 10 * 1024 * 1024:
         raise HTTPException(400, "File too large (max 10 MB)")
 
-    # Credit check for builtin provider
-    from app.services.pipeline import check_and_deduct_credits
-    if provider == "builtin":
-        cost = settings.credit_cost_per_generation
-        ok = check_and_deduct_credits(
-            user.id, provider, db,
-            description=f"Generate: {name} ({cost} credits)",
-        )
-        if not ok:
-            raise HTTPException(402, f"积分不足！需要 {cost} 积分，当前余额: {user.credits}")
-
     pet_id = str(uuid.uuid4())
     ext = allowed[file.content_type]
     photo_path = storage.save_upload(contents, f"{pet_id}_source.{ext}")
 
-    pet = Pet(id=pet_id, user_id=user.id, name=name, status=PetStatus.UPLOADED, source_photo_path=photo_path)
+    pet = Pet(id=pet_id, name=name, status=PetStatus.UPLOADED, source_photo_path=photo_path)
     db.add(pet)
 
     job = GenerationJob(
         id=str(uuid.uuid4()),
-        user_id=user.id,
         pet_id=pet_id,
         status=JobStatus.QUEUED,
         provider=provider,
@@ -66,8 +49,9 @@ async def upload_photo(
     db.commit()
     db.refresh(job)
 
-    from app.services.pipeline import run_pipeline_background
-    background_tasks.add_task(run_pipeline_background, job.id)
+    # The reviewed flow drives stages one-by-one via POST /jobs/{id}/next, so we
+    # do NOT auto-run the pipeline here — that would race the step-by-step review
+    # and burn AI generations before the user approves each stage.
 
     return UploadResponse(pet_id=pet_id, job_id=job.id, status="queued")
 
@@ -75,12 +59,9 @@ async def upload_photo(
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(
     job_id: str,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    job = db.query(GenerationJob).filter(
-        GenerationJob.id == job_id, GenerationJob.user_id == user.id
-    ).first()
+    job = db.query(GenerationJob).filter(GenerationJob.id == job_id).first()
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -103,17 +84,14 @@ def get_job_status(
 @router.post("/jobs/{job_id}/next")
 def run_next_stage(
     job_id: str,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    job = db.query(GenerationJob).filter(
-        GenerationJob.id == job_id, GenerationJob.user_id == user.id
-    ).first()
+    job = db.query(GenerationJob).filter(GenerationJob.id == job_id).first()
     if not job:
         raise HTTPException(404, "Job not found")
 
     next_stage = job.stage_progress + 1
-    if next_stage > 5:
+    if next_stage > 3:
         raise HTTPException(400, "All stages completed")
 
     from app.services.pipeline import run_single_stage
@@ -125,16 +103,33 @@ def run_next_stage(
     return result
 
 
+@router.post("/jobs/{job_id}/regenerate")
+def regenerate_stage(
+    job_id: str,
+    body: RegenerateStageRequest,
+    db: Session = Depends(get_db),
+):
+    """Re-run a single stage in place without advancing to the next one."""
+    job = db.query(GenerationJob).filter(GenerationJob.id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    from app.services.pipeline import run_single_stage
+    result = run_single_stage(job_id, body.stage)
+
+    if result.get("status") == "error":
+        raise HTTPException(500, result.get("message", "Stage failed"))
+
+    return result
+
+
 @router.post("/jobs/{job_id}/confirm")
 def confirm_job(
     job_id: str,
     body: ConfirmRequest,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    job = db.query(GenerationJob).filter(
-        GenerationJob.id == job_id, GenerationJob.user_id == user.id
-    ).first()
+    job = db.query(GenerationJob).filter(GenerationJob.id == job_id).first()
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -162,7 +157,6 @@ def confirm_job(
         pet = db.query(Pet).filter(Pet.id == job.pet_id).first()
         new_job = GenerationJob(
             id=str(uuid.uuid4()),
-            user_id=user.id,
             pet_id=job.pet_id,
             status=JobStatus.QUEUED,
             provider=job.provider,
@@ -181,10 +175,9 @@ def confirm_job(
 @router.get("/download/{pet_id}")
 def download_pet(
     pet_id: str,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    pet = db.query(Pet).filter(Pet.id == pet_id, Pet.user_id == user.id).first()
+    pet = db.query(Pet).filter(Pet.id == pet_id).first()
     if not pet or not pet.asset_bundle_path:
         raise HTTPException(404, "Pet bundle not found")
     if pet.status != PetStatus.READY:
@@ -206,14 +199,25 @@ def _build_pet_bundle(pet: Pet) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         asset_dir = Path(settings.asset_dir) / pet.id
-        for fname in ["skeleton.json", "atlas.png", "atlas.json", "preview_front.png"]:
+        top_level = [
+            "skeleton.json", "atlas.png", "atlas.json", "preview_front.png", "manifest.json",
+            "spritesheet_idle.png", "spritesheet_dragged.png", "spritesheet_eating.png",
+            "spritesheet_sleep.png", "spritesheet_petting.png",
+        ]
+        for fname in top_level:
             fpath = asset_dir / fname
             if fpath.exists():
                 zf.write(fpath, fname)
+        # Per-frame PNGs referenced by manifest.json (frames/{anim}/frame-*.png).
+        frames_dir = asset_dir / "frames"
+        if frames_dir.exists():
+            for fpath in sorted(frames_dir.rglob("*.png")):
+                arcname = str(fpath.relative_to(asset_dir)).replace("\\", "/")
+                zf.write(fpath, arcname)
         zf.writestr("metadata.json", json_mod.dumps({
+            "asset_type": "spritesheet",
             "name": pet.name,
             "pet_id": pet.id,
-            "rig_quality": pet.rig_quality,
             "created_at": pet.created_at.isoformat() if pet.created_at else "",
         }))
     return buf.getvalue()

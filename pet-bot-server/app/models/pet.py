@@ -18,7 +18,6 @@ class Pet(Base):
     __tablename__ = "pets"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), default="My Pet")
     status: Mapped[PetStatus] = mapped_column(SAEnum(PetStatus), default=PetStatus.UPLOADED)
     source_photo_path: Mapped[str] = mapped_column(String(512), nullable=True)

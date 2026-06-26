@@ -1,22 +1,29 @@
-import io
-import json as _json
+import json
 import logging
 from io import BytesIO
-from pathlib import Path
-from datetime import date
+
+from PIL import Image
+
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.pet import Pet, PetStatus
 from app.models.generation_job import GenerationJob, JobStatus
-from app.models.quota import QuotaUsage
-from app.models.user import User
-from app.models.credit_transaction import CreditTransaction, TransactionType
-from app.config import settings
 from app.providers.registry import get_provider
-from app.providers.base import PoseResult, SegmentationResult, RiggingResult
+from app.services.action_frames import build_action_frame_assets
 from app.storage.local import storage
 
 logger = logging.getLogger(__name__)
+
+# The reviewed three-step spritesheet flow:
+#   1. reference  — generate the three-view character sheet (doubles as the idle sheet)
+#   2. actions    — generate the action spritesheets, conditioned on the reference
+#   3. package    — slice frames, build the manifest, write the bundle assets
+ACTION_NAMES = ["dragged", "eating", "sleep", "petting"]
+ALL_ANIMATIONS = ["idle", *ACTION_NAMES]
+
+
+def _normalize_path(path: str) -> str:
+    return path.replace("\\", "/")
 
 
 def run_pipeline_background(job_id: str):
@@ -36,7 +43,121 @@ def run_pipeline_background(job_id: str):
         db.close()
 
 
+# --- Stage implementations -------------------------------------------------
+# Each helper mutates the passed-in `pet` (and does file I/O via `storage`);
+# the caller owns the db session and commits.
+
+def _run_reference_stage(pet: Pet, provider, photo_bytes: bytes) -> dict:
+    """Stage 1 — three-view reference sheet, saved as the idle spritesheet."""
+    reference_sheet = provider.generate_reference_sheet(photo_bytes)
+    path = storage.save_asset(reference_sheet, pet.id, "spritesheet_idle.png")
+    return {
+        "stage": 1,
+        "status": "ok",
+        "sprite_type": "reference_sheet",
+        "preview": _normalize_path(path),
+    }
+
+
+def _run_actions_stage(pet: Pet, provider, photo_bytes: bytes) -> dict:
+    """Stage 2 — action spritesheets, conditioned on the approved reference."""
+    reference_sheet = storage.read(storage.get_asset_path(pet.id, "spritesheet_idle.png"))
+    sheets = provider.generate_action_sheets(photo_bytes, context_images=[reference_sheet])
+
+    previews = {}
+    for name in ACTION_NAMES:
+        storage.save_asset(sheets[name], pet.id, f"spritesheet_{name}.png")
+        previews[name] = storage.get_asset_path(pet.id, f"spritesheet_{name}.png").replace("\\", "/")
+
+    return {
+        "stage": 2,
+        "status": "ok",
+        "sprite_type": "action_pack",
+        "previews": previews,
+    }
+
+
+def _run_package_stage(pet: Pet) -> dict:
+    """Stage 3 — slice frames, build the manifest, write bundle assets."""
+    reference_sheet = storage.read(storage.get_asset_path(pet.id, "spritesheet_idle.png"))
+    action_sheets = {
+        name: storage.read(storage.get_asset_path(pet.id, f"spritesheet_{name}.png"))
+        for name in ACTION_NAMES
+    }
+
+    frame_files, manifest = build_action_frame_assets(reference_sheet, action_sheets)
+    for rel_path, data in frame_files.items():
+        storage.save_asset(data, pet.id, rel_path)
+    storage.save_asset(json.dumps(manifest).encode("utf-8"), pet.id, "manifest.json")
+
+    idle_frame = frame_files.get("frames/idle/frame-0.png") or next(iter(frame_files.values()))
+    preview_path = storage.save_asset(idle_frame, pet.id, "preview_front.png")
+
+    # Compatibility artifacts: the desktop-pet renderer is frame/manifest-based
+    # and ignores these, but the bundle validator (and the legacy bone fallback)
+    # still expect a skeleton + atlas. Kept minimal until the validator is
+    # retired. See docs/superpowers/plans/2026-06-23-reviewed-sprite-generation.md
+    skeleton_json = _compat_skeleton()
+    storage.save_asset(skeleton_json.encode("utf-8"), pet.id, "skeleton.json")
+    atlas_png, atlas_json = _compat_atlas(idle_frame)
+    storage.save_asset(atlas_png, pet.id, "atlas.png")
+    storage.save_asset(atlas_json.encode("utf-8"), pet.id, "atlas.json")
+
+    pet.skeleton_json = skeleton_json
+    pet.preview_front = preview_path
+    pet.status = PetStatus.AWAITING_REVIEW
+
+    return {
+        "stage": 3,
+        "status": "ok",
+        "sprite_type": "spritesheet_bundle",
+        "preview": _normalize_path(preview_path),
+        "animations": list(manifest.get("animations", {}).keys()),
+    }
+
+
+def _compat_skeleton() -> str:
+    """Minimal skeleton JSON for bundle-validator compatibility (>=4 bones, idle)."""
+    skeleton = {
+        "skeleton": {"spine": "4.1.0", "width": 256, "height": 256},
+        "bones": [
+            {"name": "root"},
+            {"name": "body", "parent": "root"},
+            {"name": "head", "parent": "body"},
+            {"name": "left_arm", "parent": "body"},
+            {"name": "right_arm", "parent": "body"},
+        ],
+        "slots": [],
+        "skins": {"default": {}},
+        "animations": {name: {} for name in ALL_ANIMATIONS},
+    }
+    return json.dumps(skeleton)
+
+
+def _compat_atlas(frame_png: bytes) -> tuple[bytes, str]:
+    """Minimal atlas PNG + JSON (>=2 regions) for bundle-validator compatibility."""
+    frame = Image.open(BytesIO(frame_png)).convert("RGBA")
+    width, height = frame.size
+    atlas = Image.new("RGBA", (width * 2, height), (0, 0, 0, 0))
+    atlas.alpha_composite(frame, (0, 0))
+    atlas.alpha_composite(frame, (width, 0))
+    buf = BytesIO()
+    atlas.save(buf, format="PNG")
+    atlas_json = json.dumps({
+        "image": "atlas.png",
+        "size": {"w": width * 2, "h": height},
+        "regions": {
+            "idle_0": {"x": 0, "y": 0, "w": width, "h": height},
+            "idle_1": {"x": width, "y": 0, "w": width, "h": height},
+        },
+    })
+    return buf.getvalue(), atlas_json
+
+
+# --- Orchestration ---------------------------------------------------------
+
 def _run_pipeline_sync(db: Session, job: GenerationJob, pet: Pet):
+    """Run all three stages end-to-end (non-reviewed path / tests)."""
     provider = get_provider(job.provider)
     photo_bytes = storage.read(pet.source_photo_path)
 
@@ -45,60 +166,17 @@ def _run_pipeline_sync(db: Session, job: GenerationJob, pet: Pet):
     db.commit()
 
     try:
-        # Stage 1: Pose
         job.stage_progress = 1
         db.commit()
-        pose = provider.estimate_pose(photo_bytes)
-        if not pose.passed:
-            job.status = JobStatus.NEEDS_BETTER_PHOTO
-            job.error_message = (
-                f"Pose detection failed: {pose.keypoint_count} keypoints, "
-                f"confidence {pose.confidence:.2f}. Please upload a clear front-facing photo."
-            )
-            job.failed_stage = "pose_estimation"
-            pet.status = PetStatus.FAILED
-            pet.error_message = job.error_message
-            db.commit()
-            return
+        _run_reference_stage(pet, provider, photo_bytes)
 
-        # Stage 2: Background Removal
         job.stage_progress = 2
         db.commit()
-        bg_removed = provider.remove_background(photo_bytes)
+        _run_actions_stage(pet, provider, photo_bytes)
 
-        # Stage 3: Part Segmentation
         job.stage_progress = 3
         db.commit()
-        segmentation = provider.segment_parts(bg_removed, pose)
-
-        # Stage 4: Skeleton Rigging
-        job.stage_progress = 4
-        db.commit()
-        rigging = provider.rig_skeleton(pose, segmentation)
-        pet.rig_quality = rigging.rig_quality
-
-        # Stage 5: Atlas + Preview
-        job.stage_progress = 5
-        db.commit()
-        atlas = provider.build_atlas(segmentation, rigging)
-        if not atlas.passed:
-            job.status = JobStatus.FAILED
-            job.error_message = f"Atlas generation failed: {atlas.region_count} regions"
-            job.failed_stage = "atlas"
-            pet.status = PetStatus.FAILED
-            pet.error_message = job.error_message
-            db.commit()
-            return
-
-        # Save all assets
-        storage.save_asset(atlas.atlas_png, pet.id, "atlas.png")
-        storage.save_asset(atlas.atlas_json.encode("utf-8"), pet.id, "atlas.json")
-        preview_path = storage.save_asset(atlas.preview_front, pet.id, "preview_front.png")
-        storage.save_asset(rigging.skeleton_json.encode("utf-8"), pet.id, "skeleton.json")
-
-        pet.skeleton_json = rigging.skeleton_json
-        pet.preview_front = preview_path
-        pet.status = PetStatus.AWAITING_REVIEW
+        _run_package_stage(pet)
         job.status = JobStatus.AWAITING_REVIEW
         db.commit()
 
@@ -130,99 +208,15 @@ def run_single_stage(job_id: str, stage_num: int) -> dict:
         pet.status = PetStatus.GENERATING
         db.commit()
 
-        result = {"stage": stage_num, "status": "ok"}
-
         if stage_num == 1:
-            pose = provider.estimate_pose(photo_bytes)
-            if not pose.passed:
-                job.status = JobStatus.NEEDS_BETTER_PHOTO
-                job.error_message = f"识别到 {pose.keypoint_count} 个关键点，置信度 {pose.confidence:.2f}。请上传清晰的正面照片。"
-                job.failed_stage = "pose_estimation"
-                db.commit()
-                return {"stage": 1, "status": "failed", "message": job.error_message,
-                        "keypoints": pose.keypoint_count, "confidence": round(pose.confidence, 2)}
-            # Save pose visualization
-            pose_img = _draw_pose_overlay(photo_bytes, pose)
-            path = storage.save_asset(pose_img, pet.id, "stage1_pose.png")
-            result["preview"] = path
-            result["keypoints"] = pose.keypoint_count
-            result["confidence"] = round(pose.confidence, 2)
-            # Save bg_removed for next stage
-            bg_removed = provider.remove_background(photo_bytes)
-            storage.save_asset(bg_removed, pet.id, "stage_bg_removed.png")
-
+            result = _run_reference_stage(pet, provider, photo_bytes)
         elif stage_num == 2:
-            bg_path = storage.get_asset_path(pet.id, "stage_bg_removed.png")
-            bg_removed = storage.read(bg_path) if Path(bg_path).exists() else photo_bytes
-            # Just show the bg-removed result
-            result["preview"] = bg_path
-            result["message"] = "背景已移除"
-
+            result = _run_actions_stage(pet, provider, photo_bytes)
         elif stage_num == 3:
-            bg_path = storage.get_asset_path(pet.id, "stage_bg_removed.png")
-            bg_removed = storage.read(bg_path) if Path(bg_path).exists() else photo_bytes
-            # Re-run pose for keypoints
-            pose = provider.estimate_pose(photo_bytes)
-            segmentation = provider.segment_parts(bg_removed, pose)
-            # Draw segmentation visualization
-            seg_img = _draw_segmentation(bg_removed, segmentation)
-            path = storage.save_asset(seg_img, pet.id, "stage3_segmentation.png")
-            result["preview"] = path
-            result["parts"] = segmentation.part_count
-            # Save segmentation data as pickled numpy (or save part images individually)
-            for name, arr in segmentation.parts.items():
-                from PIL import Image
-                img = Image.fromarray(arr)
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                storage.save_asset(buf.getvalue(), pet.id, f"part_{name}.png")
-
-        elif stage_num == 4:
-            bg_path = storage.get_asset_path(pet.id, "stage_bg_removed.png")
-            bg_removed = storage.read(bg_path) if Path(bg_path).exists() else photo_bytes
-            pose = provider.estimate_pose(photo_bytes)
-            segmentation = provider.segment_parts(bg_removed, pose)
-            rigging = provider.rig_skeleton(pose, segmentation)
-            pet.rig_quality = rigging.rig_quality
-            # Save skeleton
-            storage.save_asset(rigging.skeleton_json.encode("utf-8"), pet.id, "skeleton.json")
-            pet.skeleton_json = rigging.skeleton_json
-            # Draw skeleton preview
-            skel_img = _draw_skeleton_overlay(photo_bytes, rigging.skeleton_json)
-            path = storage.save_asset(skel_img, pet.id, "stage4_skeleton.png")
-            result["preview"] = path
-            result["bones"] = rigging.bone_count
-            result["rig_quality"] = rigging.rig_quality
-
-        elif stage_num == 5:
-            bg_path = storage.get_asset_path(pet.id, "stage_bg_removed.png")
-            bg_removed = storage.read(bg_path) if Path(bg_path).exists() else photo_bytes
-            pose = provider.estimate_pose(photo_bytes)
-            segmentation = provider.segment_parts(bg_removed, pose)
-            rigging_json = pet.skeleton_json or "{}"
-            import json as _json
-            rigging_data = _json.loads(rigging_json)
-            from app.providers.base import RiggingResult
-            rigging = RiggingResult(
-                skeleton_json=rigging_json,
-                bone_count=len(rigging_data.get("bones", [])),
-                rig_quality=pet.rig_quality or "partial",
-            )
-            atlas = provider.build_atlas(segmentation, rigging)
-            if not atlas.passed:
-                job.status = JobStatus.FAILED
-                job.error_message = "Atlas 生成失败"
-                db.commit()
-                return {"stage": 5, "status": "failed", "message": job.error_message}
-
-            storage.save_asset(atlas.atlas_png, pet.id, "atlas.png")
-            storage.save_asset(atlas.atlas_json.encode("utf-8"), pet.id, "atlas.json")
-            preview_path = storage.save_asset(atlas.preview_front, pet.id, "preview_front.png")
-            pet.preview_front = preview_path
-            result["preview"] = preview_path
-
-            pet.status = PetStatus.AWAITING_REVIEW
+            result = _run_package_stage(pet)
             job.status = JobStatus.AWAITING_REVIEW
+        else:
+            return {"stage": stage_num, "status": "error", "message": f"Unknown stage {stage_num}"}
 
         job.stage_progress = stage_num
         db.commit()
@@ -232,123 +226,3 @@ def run_single_stage(job_id: str, stage_num: int) -> dict:
         return {"stage": stage_num, "status": "error", "message": str(e)}
     finally:
         db.close()
-
-
-def _draw_pose_overlay(image_bytes: bytes, pose) -> bytes:
-    from PIL import Image, ImageDraw
-    img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-    draw = ImageDraw.Draw(img)
-    for kp in pose.keypoints:
-        if kp.get("visibility", 0) > 0.5:
-            x, y = kp["x"], kp["y"]
-            draw.ellipse([x-4, y-4, x+4, y+4], fill=(0, 255, 0, 200), outline=(0, 200, 0, 255))
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def _draw_segmentation(image_bytes: bytes, segmentation) -> bytes:
-    from PIL import Image, ImageDraw
-    img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    colors = {"head": (255, 0, 0, 80), "torso": (0, 255, 0, 80),
-              "left_arm": (0, 0, 255, 80), "right_arm": (0, 0, 255, 80),
-              "left_leg": (255, 255, 0, 80), "right_leg": (255, 255, 0, 80)}
-    # Draw colored bounding boxes based on part positions in atlas
-    y_off = 20
-    for name, color in colors.items():
-        if name in segmentation.parts:
-            draw.rectangle([10, y_off, 110, y_off + 60], fill=color, outline=(255, 255, 255, 200))
-            # Label
-            y_off += 70
-    img = Image.alpha_composite(img, overlay)
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def _draw_skeleton_overlay(image_bytes: bytes, skeleton_json: str) -> bytes:
-    from PIL import Image, ImageDraw
-    import json
-    img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-    draw = ImageDraw.Draw(img)
-    data = json.loads(skeleton_json)
-    bones = {b["name"]: b for b in data.get("bones", [])}
-    for b in data.get("bones", []):
-        if b["parent"] and b["parent"] in bones:
-            p = bones[b["parent"]]
-            draw.line([(p["x"], p["y"]), (b["x"], b["y"])], fill=(255, 100, 100, 200), width=2)
-        draw.ellipse([b["x"]-3, b["y"]-3, b["x"]+3, b["y"]+3], fill=(255, 50, 50, 200))
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def check_and_deduct_credits(user_id: str, provider: str, db: Session, description: str = "") -> bool:
-    """For builtin provider: check if user has enough credits, deduct if yes.
-    Admin users skip the check and never get deducted.
-    Returns True if deduction succeeded, False if insufficient credits."""
-    if provider != "builtin":
-        return True
-
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        return False
-    if user.role == "admin":
-        return True  # Admin — unlimited usage
-
-    cost = settings.credit_cost_per_generation
-    if user.credits < cost:
-        return False
-
-    user.credits -= cost
-    txn = CreditTransaction(
-        user_id=user_id,
-        type=TransactionType.CONSUME,
-        amount=-cost,
-        balance_after=user.credits,
-        description=description or f"Generation cost: {cost} credits",
-    )
-    db.add(txn)
-    db.commit()
-    return True
-
-
-def add_credits(user_id: str, amount: int, db: Session, description: str = "Recharge") -> int:
-    """Add credits to user account. Returns new balance."""
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise ValueError("User not found")
-    user.credits += amount
-    txn = CreditTransaction(
-        user_id=user_id,
-        type=TransactionType.RECHARGE,
-        amount=amount,
-        balance_after=user.credits,
-        description=description,
-    )
-    db.add(txn)
-    db.commit()
-    return user.credits
-
-
-def check_and_increment_quota(user_id: str, provider: str, db: Session) -> bool:
-    """Deprecated — use check_and_deduct_credits instead."""
-    """Return True if user is within quota. Increments count on success."""
-    today = date.today()
-    quota = db.query(QuotaUsage).filter(
-        QuotaUsage.user_id == user_id,
-        QuotaUsage.provider == provider,
-        QuotaUsage.usage_date == today,
-    ).first()
-
-    if quota:
-        if quota.job_count >= settings.max_free_generations:
-            return False
-        quota.job_count += 1
-    else:
-        quota = QuotaUsage(user_id=user_id, provider=provider, job_count=1, usage_date=today)
-        db.add(quota)
-    db.commit()
-    return True

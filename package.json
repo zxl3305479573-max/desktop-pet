@@ -4,10 +4,12 @@
   "description": "Custom desktop pet from your photos",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "concurrently -k \"npm run dev:renderer\" \"npm run dev:electron\"",
+    "dev": "node scripts/dev.mjs",
     "dev:renderer": "vite",
     "dev:electron": "node scripts/dev-electron.mjs",
-    "build": "vite build && node scripts/build-electron.mjs"
+    "dev:backend": "cd pet-bot-server && .\\venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+    "build": "vite build && node scripts/build-electron.mjs",
+    "rebuild:native": "npx -y @electron/rebuild -f -w better-sqlite3 -v 33.4.11 --build-from-source"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",

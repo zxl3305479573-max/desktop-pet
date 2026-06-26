@@ -11,7 +11,7 @@ export function createMainWindow(): BrowserWindow {
     minHeight: 500,
     title: '可视化伴侣',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -20,9 +20,9 @@ export function createMainWindow(): BrowserWindow {
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    win.loadURL(`${process.env.ELECTRON_RENDERER_URL}/main.html`)
+    win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    win.loadFile(join(__dirname, '../renderer/main.html'))
+    win.loadFile(join(__dirname, '../dist-renderer/index.html'))
   }
 
   win.once('ready-to-show', () => win.show())
@@ -49,7 +49,7 @@ export function createPetWindow(_petId: string): BrowserWindow {
     skipTaskbar: true,
     hasShadow: false,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -57,9 +57,11 @@ export function createPetWindow(_petId: string): BrowserWindow {
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    win.loadURL(`${process.env.ELECTRON_RENDERER_URL}/pet.html?petId=${_petId}`)
+    win.loadURL(`${process.env.ELECTRON_RENDERER_URL}/pet-renderer/index.html?petId=${_petId}`)
   } else {
-    win.loadFile(join(__dirname, '../renderer/pet.html'))
+    win.loadFile(join(__dirname, '../dist-renderer/pet-renderer/index.html'), {
+      query: { petId: _petId },
+    })
   }
 
   return win

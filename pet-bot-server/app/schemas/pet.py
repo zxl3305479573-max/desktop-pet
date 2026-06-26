@@ -12,7 +12,6 @@ class PetResponse(BaseModel):
     name: str
     status: str
     preview_front: Optional[str] = None
-    rig_quality: Optional[str] = None
     error_message: Optional[str] = None
     created_at: datetime
 

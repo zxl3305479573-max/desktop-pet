@@ -1,8 +1,14 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
+# --- Legacy local-processing result types ---------------------------------
+# Retained as pure data containers for the legacy services still imported by
+# the test suite (atlas.py, rigging.py, pipeline.py). The active provider
+# contract below uses the spritesheet methods, not these. Remove once the
+# reviewed-sprite pipeline migration retires the legacy services.
+# See: docs/superpowers/plans/2026-06-23-reviewed-sprite-generation.md
 @dataclass
 class PoseResult:
     keypoints: list[dict]
@@ -46,16 +52,11 @@ class AIProvider(ABC):
     def name(self) -> str: ...
 
     @abstractmethod
-    def estimate_pose(self, image_bytes: bytes) -> PoseResult: ...
+    def generate_reference_sheet(self, photo_bytes: bytes) -> bytes: ...
 
     @abstractmethod
-    def remove_background(self, image_bytes: bytes) -> bytes: ...
-
-    @abstractmethod
-    def segment_parts(self, image_bytes: bytes, pose: PoseResult) -> SegmentationResult: ...
-
-    @abstractmethod
-    def rig_skeleton(self, pose: PoseResult, segmentation: SegmentationResult) -> RiggingResult: ...
-
-    @abstractmethod
-    def build_atlas(self, segmentation: SegmentationResult, rigging: RiggingResult) -> AtlasResult: ...
+    def generate_action_sheets(
+        self,
+        photo_bytes: bytes,
+        context_images: list[bytes] | None = None,
+    ) -> dict[str, bytes]: ...

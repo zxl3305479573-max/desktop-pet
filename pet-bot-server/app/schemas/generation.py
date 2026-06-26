@@ -13,7 +13,7 @@ class JobStatusResponse(BaseModel):
     job_id: str
     pet_id: str
     status: str  # queued|running|awaiting_review|completed|failed|needs_better_photo
-    stage_progress: int  # 0-5
+    stage_progress: int  # 0-3
     error_message: Optional[str] = None
     failed_stage: Optional[str] = None
     preview_front: Optional[str] = None  # populated when awaiting_review
@@ -25,3 +25,7 @@ class JobStatusResponse(BaseModel):
 
 class ConfirmRequest(BaseModel):
     action: str = Field(pattern="^(confirm|regenerate)$")
+
+
+class RegenerateStageRequest(BaseModel):
+    stage: int = Field(ge=1, le=3)

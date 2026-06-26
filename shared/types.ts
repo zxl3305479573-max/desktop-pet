@@ -3,7 +3,6 @@ export interface PetStatus {
   name: string
   status: 'uploaded' | 'processing' | 'awaiting_review' | 'ready' | 'failed'
   preview_front: string | null
-  rig_quality: string | null
   error_message: string | null
   created_at: string
 }
@@ -26,6 +25,7 @@ export interface JobStatus {
   pet_id: string
   status: 'queued' | 'running' | 'awaiting_review' | 'completed' | 'failed' | 'needs_better_photo'
   stage_progress: number
+  sprite_type?: string
   error_message: string | null
   failed_stage: string | null
   preview_front: string | null
