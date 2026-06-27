@@ -9,7 +9,7 @@ from app.database import SessionLocal
 from app.models.pet import Pet, PetStatus
 from app.models.generation_job import GenerationJob, JobStatus
 from app.providers.registry import get_provider
-from app.services.action_frames import build_action_frame_assets
+from app.services.action_frames import build_action_frame_assets, extract_action_frames
 from app.storage.local import storage
 
 logger = logging.getLogger(__name__)
@@ -62,18 +62,42 @@ def _run_reference_stage(pet: Pet, provider, photo_bytes: bytes) -> dict:
 def _run_actions_stage(pet: Pet, provider, photo_bytes: bytes) -> dict:
     """Stage 2 — action spritesheets, conditioned on the approved reference."""
     reference_sheet = storage.read(storage.get_asset_path(pet.id, "spritesheet_idle.png"))
-    sheets = provider.generate_action_sheets(photo_bytes, context_images=[reference_sheet])
+    sheets = provider.generate_action_sheets(photo_bytes, reference_sheet_bytes=reference_sheet)
 
-    previews = {}
+    previews: dict[str, list[str]] = {}
+    frame_counts: dict[str, int] = {}
     for name in ACTION_NAMES:
         storage.save_asset(sheets[name], pet.id, f"spritesheet_{name}.png")
-        previews[name] = storage.get_asset_path(pet.id, f"spritesheet_{name}.png").replace("\\", "/")
+
+        # Extract every individual character pose from the sprite sheet and
+        # save each one as a standalone frame so the frontend can show all
+        # poses, not just the first frame.
+        frames = extract_action_frames(name, sheets[name], expected_count=4)
+        if frames:
+            frame_urls: list[str] = []
+            for idx, frame in enumerate(frames):
+                frame_rel = f"frames_preview/{name}/frame-{idx}.png"
+                storage.save_asset(frame.png_bytes, pet.id, frame_rel)
+                frame_urls.append(
+                    storage.get_asset_path(pet.id, frame_rel).replace("\\", "/")
+                )
+            previews[name] = frame_urls
+            frame_counts[name] = len(frames)
+        else:
+            # Fallback: show the full spritesheet if no frames were extracted.
+            fallback_rel = f"spritesheet_{name}.png"
+            previews[name] = [
+                storage.get_asset_path(pet.id, fallback_rel).replace("\\", "/")
+            ]
+            frame_counts[name] = 0
 
     return {
         "stage": 2,
         "status": "ok",
         "sprite_type": "action_pack",
         "previews": previews,
+        "frame_counts": frame_counts,
+        "animations": list(previews.keys()),
     }
 
 

@@ -58,5 +58,5 @@ class AIProvider(ABC):
     def generate_action_sheets(
         self,
         photo_bytes: bytes,
-        context_images: list[bytes] | None = None,
+        reference_sheet_bytes: bytes,
     ) -> dict[str, bytes]: ...

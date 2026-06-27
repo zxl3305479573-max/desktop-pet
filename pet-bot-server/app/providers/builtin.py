@@ -251,56 +251,104 @@ class BuiltinProvider(AIProvider):
     def generate_action_sheets(
         self,
         photo_bytes: bytes,
-        context_images: list[bytes] | None = None,
+        reference_sheet_bytes: bytes,
     ) -> dict[str, bytes]:
-        """Generate reviewed desktop-pet action sheets after the reference sheet is approved."""
+        """Generate reviewed desktop-pet action sheets after the reference sheet is approved.
+
+        Uses the reference sheet as the PRIMARY image (character model) and the
+        original photo as context so that every action sheet inherits the exact
+        proportions, style, and details established by the three-view reference.
+        """
+        # --- shared morphological lock (prepended to every action prompt) ---
+        _morph_lock = (
+            "CHARACTER IDENTITY LOCK — The character MUST be IDENTICAL to the three-view reference "
+            "sheet in every respect: same head-to-body ratio, same limb thickness and length, same "
+            "facial features (eye shape, nose, mouth, eyebrow placement), same hairstyle and hair "
+            "color, same clothing design and colors, same silhouette, same art style and rendering "
+            "(line weight, shading, color saturation). The reference sheet is the sole source of "
+            "truth for the character's appearance. Do NOT reinterpret, stylize differently, simplify, "
+            "or alter any visual trait. The character on the reference sheet IS the character to draw "
+            "— copy it exactly and only pose it differently for each action. Do not add animal ears, "
+            "tails, paws, whiskers, fur, horns, wings, robot parts, armor, or mechanical body parts "
+            "unless they already exist on the reference sheet. "
+        )
+
         prompts = {
             "dragged": (
-                "A held pose collection of 4 different draggable desktop-pet poses for the same approved cartoon "
-                "character. Not an animation sequence. Each frame is a single stable pose that can be held while the "
-                "mouse is dragging the pet: lifted in the air, dangling, mildly panicked, flailing arms and legs. "
-                "Arrange exactly 4 separated full-body poses in one horizontal row of 4 equal-width columns, with "
-                "consistent scale, generous pure white margin around each pose, and no overlap between poses. Do not crop heads, hands, legs, "
-                "feet, hair, or props. Do not include stray body parts from any other pose inside a pose area. "
-                "Sprite sheet, character asset, isolated on a solid pure white background. Match the approved "
-                "reference sheet exactly. Do not add animal ears, tails, paws, robot parts, armor, or mechanical "
-                "body parts unless they already exist in the reference sheet."
+                _morph_lock +
+                "A held pose collection of 4 different draggable desktop-pet poses for the reference "
+                "sheet character. Not an animation sequence. Each frame is a single stable pose that "
+                "can be held while the mouse is dragging the pet: lifted in the air, dangling, mildly "
+                "panicked, flailing arms and legs. "
+                "CRITICAL LAYOUT: Place the 4 poses in one horizontal row. Each pose must occupy its "
+                "own clearly separated column. Leave a wide empty vertical gap (at least 10%% of the "
+                "image width) between adjacent poses so they are visually isolated with no overlap "
+                "whatsoever. Every pose must be the same consistent full-body scale with feet aligned "
+                "on a shared horizontal baseline. Generous pure white padding around every individual "
+                "pose. Do not let limbs, hair, clothing, or props extend into the gap between poses. "
+                "Do not crop heads, hands, legs, feet, hair, or props. Do not include stray body "
+                "parts from any other pose inside a pose area. "
+                "Sprite sheet, character asset, isolated on a solid pure white background."
             ),
             "eating": (
-                "A feeding animation sequence sprite sheet for the same approved cartoon character. Arrange each "
-                "feeding sequence as a row of exactly 4 frames, equal-width, left-to-right, showing one complete feeding action: "
-                "not holding food, lifting a battery shape cookie, biting/chewing, happy satisfied expression. If "
-                "you include multiple variations, put each variation on its own separate row of exactly 4 frames, equal-width. "
-                "Every frame must show one full-body character only, with consistent scale and baseline. Chibi "
-                "character design, game asset, isolated on a solid pure white background. Match the approved "
-                "reference sheet exactly. Do not add animal ears, tails, paws, robot parts, armor, or mechanical body "
-                "parts unless they already exist in the reference sheet."
+                _morph_lock +
+                "An eating animation sequence sprite sheet for the reference sheet character. A single "
+                "smooth 4-frame sequence showing the character happily eating: frame 1 — holding a small "
+                "glowing digital fish with sparkling eyes of anticipation; frame 2 — lifting the fish to "
+                "its mouth with a delighted expression; frame 3 — biting and chewing with pure joy, tiny "
+                "sparkles around; frame 4 — swallowing contentedly with a satisfied happy smile and "
+                "patting its belly. "
+                "CRITICAL LAYOUT: Place the 4 frames in one horizontal row, left-to-right animation "
+                "order. Each frame must occupy its own clearly separated column. Leave a wide empty "
+                "vertical gap (at least 10%% of the image width) between adjacent frames so they are "
+                "visually isolated with no overlap whatsoever. Every frame must be the same consistent "
+                "full-body scale with feet aligned on a shared horizontal baseline. Generous pure white "
+                "padding around every individual frame. Do not let limbs, hair, clothing, or props "
+                "extend into the gap between frames. Do not crop heads, hands, legs, feet, hair, or "
+                "props, and do not include stray body parts from another frame inside a frame. Chibi "
+                "character design, game asset, isolated on a solid pure white background."
             ),
             "sleep": (
-                "A held pose collection of 4 different sleeping desktop-pet poses for the same approved cartoon "
-                "character. Not an animation sequence. Each frame is a single stable sleeping pose that can be held "
-                "after the pet is untouched for a long time: curled up, lying down, sleepy eyes closed, peaceful rest. "
-                "Arrange exactly 4 separated full-body poses on one sprite sheet with consistent scale, generous "
-                "pure white margin around each pose, and no overlap between poses. Do not crop heads, hands, legs, "
-                "feet, hair, or props. Do not include stray body parts from any other pose inside a pose area. "
-                "Chibi character design, game asset, isolated on a solid pure white background. Match the approved "
-                "reference sheet exactly. Do not add animal ears, tails, paws, robot parts, armor, or mechanical "
-                "body parts unless they already exist in the reference sheet."
+                _morph_lock +
+                "A held pose collection of 4 different sleeping desktop-pet poses for the reference "
+                "sheet character. Not an animation sequence. Each frame is one stable resting pose that "
+                "can be held while the pet is idle: lying on its side sleeping soundly with eyes closed "
+                "and a slight drool; curled up in a cozy ball with gentle rhythmic breathing; peacefully "
+                "resting with a tiny floating 'Zzz' bubble; tucked under a soft small blanket with its "
+                "face visible and tiny breathing bubbles. "
+                "CRITICAL LAYOUT: Place the 4 poses in one horizontal row. Each pose must occupy its "
+                "own clearly separated column. Leave a wide empty vertical gap (at least 10%% of the "
+                "image width) between adjacent poses so they are visually isolated with no overlap "
+                "whatsoever. Every pose must be the same consistent full-body scale with feet aligned "
+                "on a shared horizontal baseline. Generous pure white padding around every individual "
+                "pose. Do not let limbs, hair, clothing, or props extend into the gap between poses. "
+                "Do not crop heads, hands, legs, feet, hair, or props, and do not include stray body "
+                "parts from another pose inside a pose area. Chibi character design, game asset, "
+                "isolated on a solid pure white background."
             ),
             "petting": (
-                "A held pose collection of 4 different petting desktop-pet poses for the same approved cartoon "
-                "character. Not an animation sequence. Each frame is one stable petting reaction that can be shown "
-                "once after a click: gentle head pat, happy reaction with softened eyes, relaxed satisfied smile, "
-                "slightly surprised but pleased expression. Arrange exactly 4 separated full-body poses in one "
-                "horizontal row of 4 equal-width columns, with consistent scale, baseline, generous pure white margin around each pose, and no "
-                "overlap between poses. Do not crop heads, hands, legs, feet, hair, or props. Do not include stray "
-                "body parts from any other pose inside a pose area. Chibi character design, game asset, isolated on "
-                "a solid pure white background. Match the approved reference sheet exactly. Do not add animal ears, "
-                "tails, paws, robot parts, armor, or mechanical body parts unless they already exist in the reference sheet."
+                _morph_lock +
+                "A held pose collection of 4 different petting desktop-pet poses for the reference "
+                "sheet character. Not an animation sequence. Each frame is one stable petting reaction "
+                "that can be shown once after a click: gentle head pat, happy reaction with softened "
+                "eyes, relaxed satisfied smile, slightly surprised but pleased expression. "
+                "CRITICAL LAYOUT: Place the 4 poses in one horizontal row. Each pose must occupy its "
+                "own clearly separated column. Leave a wide empty vertical gap (at least 10%% of the "
+                "image width) between adjacent poses so they are visually isolated with no overlap "
+                "whatsoever. Every pose must be the same consistent full-body scale with feet aligned "
+                "on a shared horizontal baseline. Generous pure white padding around every individual "
+                "pose. Do not let limbs, hair, clothing, or props extend into the gap between poses. "
+                "Do not crop heads, hands, legs, feet, hair, or props. Do not include stray body "
+                "parts from any other pose inside a pose area. Chibi character design, game asset, "
+                "isolated on a solid pure white background."
             ),
         }
         return {
-            name: self._generate_with_body_check(prompt, photo_bytes, context_images)
+            name: self._generate_with_body_check(
+                prompt,
+                reference_sheet_bytes,               # primary image = the approved character model
+                context_images=[photo_bytes],         # original photo as identity context only
+            )
             for name, prompt in prompts.items()
         }
 

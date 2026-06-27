@@ -19,7 +19,7 @@ class PetResponse(BaseModel):
 
 
 class PetDetailResponse(PetResponse):
-    user_id: str
+    user_id: str = ""
     source_photo_path: Optional[str] = None
     asset_bundle_path: Optional[str] = None
     skeleton_json: Optional[str] = None

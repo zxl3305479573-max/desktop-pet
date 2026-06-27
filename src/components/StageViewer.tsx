@@ -48,9 +48,21 @@ export function StageViewer({ stage, previewUrl, stageData, loading, error, onCo
   const isAiStage = stage === 1 || stage === 2
   const isComplete = stageData?.status === 'ok'
   const isFailed = stageData?.status === 'failed' || stageData?.status === 'error'
-  const previews = stageData?.previews && typeof stageData.previews === 'object'
-    ? Object.entries(stageData.previews as Record<string, string>)
+  // Stage 2 (action_pack) returns Record<string, string[]> — one array of
+  // individually-extracted frame URLs per action. Stage 1/3 return
+  // Record<string, string> — one URL per key.
+  const rawPreviews: Record<string, string | string[]> | undefined =
+    stageData?.previews && typeof stageData.previews === 'object'
+      ? (stageData.previews as Record<string, string | string[]>)
+      : undefined
+  const previewEntries: Array<[string, string[]]> = rawPreviews
+    ? Object.entries(rawPreviews).map(([name, value]) => [
+        name,
+        Array.isArray(value) ? value : [value],
+      ] as [string, string[]])
     : []
+  const isMultiFrame = stage === 2 || stageData?.sprite_type === 'action_pack'
+  const frameCounts: Record<string, number> | undefined = stageData?.frame_counts
   const hasPreview = Boolean(previewUrl && !isFailed)
   const animations = Array.isArray(stageData?.animations) ? stageData.animations.join(' / ') : ''
 
@@ -105,23 +117,56 @@ export function StageViewer({ stage, previewUrl, stageData, loading, error, onCo
             <div className="mx-auto mb-3 h-2 w-28 animate-pulse rounded-full bg-blue-200" />
             <p className="text-sm text-slate-500">{loadingText}</p>
           </div>
-        ) : previews.length > 0 && !isFailed ? (
-          <div className="grid h-full w-full grid-cols-1 gap-3 overflow-auto p-3 sm:grid-cols-3">
-            {previews.map(([name, url]) => (
-              <figure key={name} className="flex min-h-0 flex-col">
-                <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-slate-200 bg-white">
-                  <img
-                    src={resolveAssetUrl(url)}
-                    alt={`${PREVIEW_LABELS[name] || name}素材预览`}
-                    className="h-full w-full object-contain"
-                  />
+        ) : previewEntries.length > 0 && !isFailed ? (
+          isMultiFrame ? (
+            /* Stage 2: action frames — one row per action, showing every extracted pose */
+            <div className="flex h-full w-full flex-col gap-4 overflow-auto p-3">
+              {previewEntries.map(([name, urls]) => (
+                <div key={name} className="min-h-0 shrink-0">
+                  <p className="mb-2 text-xs font-semibold text-slate-600">
+                    {PREVIEW_LABELS[name] || name}
+                    {frameCounts?.[name] != null && (
+                      <span className="ml-1 font-normal text-slate-400">
+                        ({frameCounts[name]} 帧)
+                      </span>
+                    )}
+                  </p>
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {urls.map((url, idx) => (
+                      <div
+                        key={`${name}-${idx}`}
+                        className="flex h-28 w-28 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white"
+                      >
+                        <img
+                          src={resolveAssetUrl(url)}
+                          alt={`${PREVIEW_LABELS[name] || name} 第${idx + 1}帧`}
+                          className="max-h-full max-w-full object-contain"
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <figcaption className="mt-1 text-center text-xs text-slate-500">
-                  {PREVIEW_LABELS[name] || name}
-                </figcaption>
-              </figure>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : (
+            /* Stage 1 / 3: single-preview grid */
+            <div className="grid h-full w-full grid-cols-1 gap-3 overflow-auto p-3 sm:grid-cols-3">
+              {previewEntries.map(([name, urls]) => (
+                <figure key={name} className="flex min-h-0 flex-col">
+                  <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                    <img
+                      src={resolveAssetUrl(urls[0])}
+                      alt={`${PREVIEW_LABELS[name] || name}素材预览`}
+                      className="h-full w-full object-contain"
+                    />
+                  </div>
+                  <figcaption className="mt-1 text-center text-xs text-slate-500">
+                    {PREVIEW_LABELS[name] || name}
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
+          )
         ) : hasPreview ? (
           <img
             src={resolveAssetUrl(previewUrl as string)}

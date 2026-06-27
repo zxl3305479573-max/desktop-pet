@@ -405,6 +405,11 @@ interface SpriteBox {
   w: number
   h: number
   area: number
+  // When present, only these pixels (global indices) belong to this frame.
+  // Lets cutouts copy a single connected component instead of every
+  // foreground pixel that happens to fall inside the rectangle, which is
+  // what caused neighbouring frames to bleed in.
+  mask?: Uint8Array
 }
 
 interface FrameCell {
@@ -634,31 +639,71 @@ function findGridFrameBoxes(
 }
 
 function findForegroundBoxInCell(foreground: Uint8Array, imageWidth: number, cell: FrameCell): FrameBox | null {
-  let minX = cell.x + cell.w
-  let minY = cell.y + cell.h
-  let maxX = cell.x
-  let maxY = cell.y
-  let area = 0
+  // The grid division is only approximate for these sheets, so a cell often
+  // contains part of an adjacent frame (e.g. the head of the frame below).
+  // Take the largest connected foreground component inside the cell and keep
+  // only those pixels — that is the frame this cell is meant to hold.
+  const left = cell.x
+  const top = cell.y
+  const right = cell.x + cell.w - 1
+  const bottom = cell.y + cell.h - 1
+  const visited = new Uint8Array(foreground.length)
+  const stack: number[] = []
 
-  for (let y = cell.y; y < cell.y + cell.h; y += 1) {
-    for (let x = cell.x; x < cell.x + cell.w; x += 1) {
-      const pixel = y * imageWidth + x
-      if (!foreground[pixel]) continue
-      area += 1
-      if (x < minX) minX = x
-      if (x > maxX) maxX = x
-      if (y < minY) minY = y
-      if (y > maxY) maxY = y
+  let best: { pixels: number[]; minX: number; minY: number; maxX: number; maxY: number } | null = null
+
+  for (let cy = top; cy <= bottom; cy += 1) {
+    for (let cx = left; cx <= right; cx += 1) {
+      const start = cy * imageWidth + cx
+      if (!foreground[start] || visited[start]) continue
+
+      const pixels: number[] = []
+      let minX = cx
+      let minY = cy
+      let maxX = cx
+      let maxY = cy
+      visited[start] = 1
+      stack.push(start)
+
+      while (stack.length > 0) {
+        const current = stack.pop()!
+        const x = current % imageWidth
+        const y = Math.floor(current / imageWidth)
+        pixels.push(current)
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+
+        if (x > left) pushCellNeighbor(current - 1)
+        if (x < right) pushCellNeighbor(current + 1)
+        if (y > top) pushCellNeighbor(current - imageWidth)
+        if (y < bottom) pushCellNeighbor(current + imageWidth)
+      }
+
+      if (!best || pixels.length > best.pixels.length) {
+        best = { pixels, minX, minY, maxX, maxY }
+      }
     }
   }
 
-  if (area === 0) return null
+  function pushCellNeighbor(next: number) {
+    if (visited[next] || !foreground[next]) return
+    visited[next] = 1
+    stack.push(next)
+  }
+
+  if (!best) return null
+
+  const mask = new Uint8Array(foreground.length)
+  for (const pixel of best.pixels) mask[pixel] = 1
+
   const padding = 4
-  const x = Math.max(cell.x, minX - padding)
-  const y = Math.max(cell.y, minY - padding)
-  const right = Math.min(cell.x + cell.w - 1, maxX + padding)
-  const bottom = Math.min(cell.y + cell.h - 1, maxY + padding)
-  return { x, y, w: right - x + 1, h: bottom - y + 1, area, cell }
+  const x = Math.max(cell.x, best.minX - padding)
+  const y = Math.max(cell.y, best.minY - padding)
+  const rightEdge = Math.min(cell.x + cell.w - 1, best.maxX + padding)
+  const bottomEdge = Math.min(cell.y + cell.h - 1, best.maxY + padding)
+  return { x, y, w: rightEdge - x + 1, h: bottomEdge - y + 1, area: best.pixels.length, cell, mask }
 }
 
 function createNormalizedFrameCutouts(
@@ -679,13 +724,14 @@ function createNormalizedFrameCutouts(
     const output = ctx.createImageData(canvasW, canvasH)
     const targetX = Math.floor((canvasW - box.cell.w) / 2)
     const targetY = canvasH - box.cell.h
+    const frameMask = box.mask ?? foreground
 
     for (let y = 0; y < box.cell.h; y += 1) {
       for (let x = 0; x < box.cell.w; x += 1) {
         const sourceX = box.cell.x + x
         const sourceY = box.cell.y + y
         const sourcePixel = sourceY * imageData.width + sourceX
-        if (!foreground[sourcePixel]) continue
+        if (!frameMask[sourcePixel]) continue
 
         const sourceOffset = sourcePixel * 4
         const targetOffset = ((targetY + y) * canvasW + targetX + x) * 4
@@ -749,6 +795,7 @@ function findForegroundBoxes(mask: Uint8Array, width: number, height: number): S
     let maxX = 0
     let maxY = 0
     let area = 0
+    const componentPixels: number[] = []
     visited[index] = 1
     stack.push(index)
 
@@ -757,6 +804,7 @@ function findForegroundBoxes(mask: Uint8Array, width: number, height: number): S
       const x = current % width
       const y = Math.floor(current / width)
       area += 1
+      componentPixels.push(current)
       if (x < minX) minX = x
       if (x > maxX) maxX = x
       if (y < minY) minY = y
@@ -774,7 +822,9 @@ function findForegroundBoxes(mask: Uint8Array, width: number, height: number): S
       const y = Math.max(0, minY - padding)
       const right = Math.min(width - 1, maxX + padding)
       const bottom = Math.min(height - 1, maxY + padding)
-      boxes.push({ x, y, w: right - x + 1, h: bottom - y + 1, area })
+      const componentMask = new Uint8Array(mask.length)
+      for (const pixel of componentPixels) componentMask[pixel] = 1
+      boxes.push({ x, y, w: right - x + 1, h: bottom - y + 1, area, mask: componentMask })
     }
   }
 
@@ -811,6 +861,7 @@ function createTransparentCutout(
   if (!ctx) return canvas
 
   const output = ctx.createImageData(box.w, box.h)
+  const frameMask = box.mask ?? foreground
   for (let y = 0; y < box.h; y += 1) {
     for (let x = 0; x < box.w; x += 1) {
       const sourceX = box.x + x
@@ -818,7 +869,7 @@ function createTransparentCutout(
       const sourcePixel = sourceY * imageData.width + sourceX
       const sourceOffset = sourcePixel * 4
       const targetOffset = (y * box.w + x) * 4
-      if (foreground[sourcePixel]) {
+      if (frameMask[sourcePixel]) {
         output.data[targetOffset] = imageData.data[sourceOffset]
         output.data[targetOffset + 1] = imageData.data[sourceOffset + 1]
         output.data[targetOffset + 2] = imageData.data[sourceOffset + 2]

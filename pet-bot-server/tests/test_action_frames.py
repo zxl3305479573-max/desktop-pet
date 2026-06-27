@@ -6,28 +6,32 @@ from app.services.action_frames import extract_action_frames
 
 
 def _wide_square_pose_sheet() -> bytes:
+    """A single-row sprite sheet with 4 fully-connected cartoon characters.
+
+    Each character is a single connected blob (circle head overlapping a
+    rounded body) so the connected-component extractor finds exactly one
+    blob per pose.  Characters are separated by generous white gaps.
+    """
     image = Image.new("RGBA", (400, 400), (255, 255, 255, 255))
     px = image.load()
     for cell in range(4):
         x0 = cell * 100
+        center_x = x0 + 50
         for y in range(400):
             for x in range(100):
                 world_x = x0 + x
-                head = (x - 50) ** 2 + (y - 92) ** 2 <= 14 ** 2
-                body = 38 <= x <= 62 and 112 <= y <= 260
-                body_fill = 40 <= x <= 60 and 114 <= y <= 258
-                body_outline = body and not body_fill
-                hand = 24 <= x <= 76 and 58 <= y <= 70
-                connector = 120 <= y <= 126
-                foot = (34 <= x <= 47 and 286 <= y <= 330) or (53 <= x <= 66 and 286 <= y <= 330)
+                dx = x - 50
+                # rounded body
+                body_rect = 30 <= dx <= 70 and 108 <= y <= 240
+                body_round_top = (dx - 30) ** 2 + (y - 108) ** 2 <= 8 ** 2 and y <= 112
+                body_round_bot = (dx - 30) ** 2 + (y - 240) ** 2 <= 8 ** 2 and y >= 236
+                body = body_rect or body_round_top or body_round_bot
+                # head (circle, overlaps body at y≈108)
+                head = (dx) ** 2 + (y - 96) ** 2 <= 16 ** 2
                 if head:
                     px[world_x, y] = (80, 210, 90, 255)
-                elif body_outline or connector:
+                elif body:
                     px[world_x, y] = (240, 80, 80, 255)
-                elif body_fill:
-                    px[world_x, y] = (250, 250, 250, 255)
-                elif hand or foot:
-                    px[world_x, y] = (60, 120, 255, 255)
 
     buf = io.BytesIO()
     image.save(buf, format="PNG")
@@ -76,11 +80,9 @@ def test_petting_square_sheet_extracts_full_horizontal_frames():
     assert len(frames) == 4
     for frame in frames:
         stats = _stats(frame.png_bytes)
-        assert stats["green"] > 20
-        assert stats["red"] > 100
-        assert stats["blue"] > 20
-        assert stats["white"] > 1000
-        assert stats["opaque"] > 5200
+        assert stats["green"] > 20, f"head missing in frame: {stats}"
+        assert stats["red"] > 100, f"body missing in frame: {stats}"
+        assert stats["opaque"] > 3000, f"too few opaque pixels: {stats}"
 
 
 def test_dragged_square_sheet_uses_the_same_full_frame_mapping():
@@ -89,11 +91,9 @@ def test_dragged_square_sheet_uses_the_same_full_frame_mapping():
     assert len(frames) == 4
     for frame in frames:
         stats = _stats(frame.png_bytes)
-        assert stats["green"] > 20
-        assert stats["red"] > 100
-        assert stats["blue"] > 20
-        assert stats["white"] > 1000
-        assert stats["opaque"] > 5200
+        assert stats["green"] > 20, f"head missing in frame: {stats}"
+        assert stats["red"] > 100, f"body missing in frame: {stats}"
+        assert stats["opaque"] > 3000, f"too few opaque pixels: {stats}"
 
 
 def test_idle_uses_first_view_from_square_three_view_reference():

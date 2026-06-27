@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { PetStatus } from '../../shared/types'
 import { cacheAndOpenPet } from '../lib/db'
 import { api, resolveAssetUrl } from '../lib/api'
@@ -42,7 +43,10 @@ export function PetCard({ pet, onDelete }: Props) {
   }
 
   return (
-    <article className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+    <Link
+      to={`/pet/${pet.id}`}
+      className="block overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:shadow-md hover:border-slate-300"
+    >
       <div className="flex aspect-square items-center justify-center bg-slate-100">
         {pet.preview_front ? (
           <img
@@ -77,7 +81,7 @@ export function PetCard({ pet, onDelete }: Props) {
         <div className="flex gap-2">
           {pet.status === 'ready' && (
             <button
-              onClick={handleLaunch}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleLaunch() }}
               disabled={launching}
               className="flex-1 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:bg-slate-300"
             >
@@ -85,13 +89,13 @@ export function PetCard({ pet, onDelete }: Props) {
             </button>
           )}
           <button
-            onClick={() => onDelete(pet.id)}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(pet.id) }}
             className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-700"
           >
             删除
           </button>
         </div>
       </div>
-    </article>
+    </Link>
   )
 }

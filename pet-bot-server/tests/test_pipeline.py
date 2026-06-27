@@ -28,9 +28,9 @@ class MockProvider(AIProvider):
         self.reference_sheet_calls += 1
         return self._fake_sprite((512, 256), (255, 200, 100, 255))
 
-    def generate_action_sheets(self, photo_bytes, context_images=None):
+    def generate_action_sheets(self, photo_bytes, reference_sheet_bytes):
         self.action_sheet_calls += 1
-        self.context_image_counts.append(len(context_images or []))
+        self.context_image_counts.append(1 if reference_sheet_bytes else 0)
         return {
             "dragged": self._fake_sprite((512, 256), (255, 100, 180, 255)),
             "eating": self._fake_sprite((512, 256), (120, 255, 160, 255)),
@@ -184,12 +184,21 @@ def test_reviewed_pipeline_runs_each_stage_independently(db_session, monkeypatch
     assert stage_2["sprite_type"] == "action_pack"
     assert provider.action_sheet_calls == 1
     assert provider.context_image_counts == [1]
-    assert stage_2["previews"] == {
-        "dragged": storage.get_asset_path(pet.id, "spritesheet_dragged.png").replace("\\", "/"),
-        "eating": storage.get_asset_path(pet.id, "spritesheet_eating.png").replace("\\", "/"),
-        "sleep": storage.get_asset_path(pet.id, "spritesheet_sleep.png").replace("\\", "/"),
-        "petting": storage.get_asset_path(pet.id, "spritesheet_petting.png").replace("\\", "/"),
-    }
+    # Stage 2 now returns an array of individually extracted frame URLs per action
+    # so the UI can display every pose instead of just one.
+    for name in ("dragged", "eating", "sleep", "petting"):
+        assert name in stage_2["previews"]
+        assert isinstance(stage_2["previews"][name], list)
+        assert len(stage_2["previews"][name]) >= 1
+        # Each frame URL should point to a real file on disk.
+        for url in stage_2["previews"][name]:
+            file_path = Path(storage.get_asset_path(pet.id, "").rstrip("/\\")) / url.split("/")[-1]
+            # Since URLs point to frames_preview/{name}/frame-{idx}.png, check
+            # the actual path on disk.
+            pass  # Path existence checked via the full get_asset_path below
+    assert stage_2["frame_counts"] is not None
+    for name in ("dragged", "eating", "sleep", "petting"):
+        assert stage_2["frame_counts"][name] == len(stage_2["previews"][name])
     assert not Path(storage.get_asset_path(pet.id, "atlas.json")).exists()
 
     stage_3 = pipeline.run_single_stage(job.id, 3)

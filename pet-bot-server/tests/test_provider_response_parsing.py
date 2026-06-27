@@ -107,7 +107,7 @@ def test_action_sheet_prompts_request_interaction_and_sleep_poses():
     provider._client = SimpleNamespace(images=fake_images)
     provider._has_full_body = lambda _image_bytes: True
 
-    assert provider.generate_action_sheets(PNG_BYTES, [PNG_BYTES]).keys() == {
+    assert provider.generate_action_sheets(PNG_BYTES, PNG_BYTES).keys() == {
         "dragged",
         "eating",
         "sleep",
@@ -119,6 +119,13 @@ def test_action_sheet_prompts_request_interaction_and_sleep_poses():
     sleep_prompt = fake_images.prompts[2].lower()
     petting_prompt = fake_images.prompts[3].lower()
 
+    # Every action prompt must include the morphological lock that pins the
+    # character to the three-view reference sheet.
+    for prompt in [dragged_prompt, eating_prompt, sleep_prompt, petting_prompt]:
+        assert "character identity lock" in prompt
+        assert "head-to-body ratio" in prompt
+        assert "reference sheet is the sole source" in prompt
+
     assert "held pose collection" in dragged_prompt
     assert "not an animation sequence" in dragged_prompt
     assert "single stable pose" in dragged_prompt
@@ -126,11 +133,23 @@ def test_action_sheet_prompts_request_interaction_and_sleep_poses():
     assert "feeding animation sequence" in eating_prompt
     assert "row of exactly 4 frames" in eating_prompt
     assert "left-to-right" in eating_prompt
-    assert "one complete feeding action" in eating_prompt
+    # New feeding variations (digital fish, energy bar, full, refusing food).
+    assert "digital fish" in eating_prompt
+    assert "refusing more food" in eating_prompt
 
-    assert "held pose collection" in sleep_prompt
-    assert "sleeping desktop-pet poses" in sleep_prompt
-    assert "single stable sleeping pose" in sleep_prompt
+    assert "sleeping pose sprite sheet" in sleep_prompt
+    assert "row of exactly 4 frames" in sleep_prompt
+    # New sleep variations (basic, deep sleep / standby, blanket).
+    assert "deep sleep" in sleep_prompt
+    assert "blanket" in sleep_prompt
+
+    # Shared invariants that keep identity preserved and slicing clean.
+    for action_prompt in (eating_prompt, sleep_prompt):
+        # The old "match the approved reference sheet" phrase is now covered
+        # by the stronger morphological lock prefix verified above.
+        assert "reference sheet" in action_prompt
+        assert "no overlap between frames" in action_prompt
+        assert "--ar" not in action_prompt and "--v" not in action_prompt
 
     assert "held pose collection" in petting_prompt
     assert "petting desktop-pet poses" in petting_prompt
