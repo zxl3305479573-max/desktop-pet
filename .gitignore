@@ -1,0 +1,30 @@
+.superpowers/
+node_modules/
+dist/
+dist-electron/
+dist-renderer/
+.env
+pet-bot-server/.env
+__pycache__/
+*.pyc
+pet-bot-server/test.db
+pet-bot-server/petbot.db
+pet-bot-server/uploads/*
+pet-bot-server/assets/*
+pet-bot-server/venv/
+# 临时日志和脚本
+*.log
+*.err.log
+*.out.log
+*.cmd
+# 根目录临时文件
+test.db
+petbot.db
+output/
+assets/
+uploads/
+.playwright-cli/
+run-*.mjs
+run-*.cmd
+dev-*.mjs
+start-*.mjs
